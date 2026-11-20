@@ -1,0 +1,7 @@
+---
+source: crates/evidence-cli/tests/cli.rs
+expression: "p.stdout(&[\"tree\", \"--invert\", \"raw\"])"
+---
+raw source
+└── high derived
+    └── report authored

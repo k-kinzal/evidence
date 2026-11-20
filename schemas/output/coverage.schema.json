@@ -1,0 +1,279 @@
+{
+  "$defs": {
+    "ClaimHealth": {
+      "description": "Status of a claim, ordered by display priority (the worst status wins where claims overlap).",
+      "oneOf": [
+        {
+          "const": "primary",
+          "description": "Declared as primary information.",
+          "type": "string"
+        },
+        {
+          "const": "covered",
+          "description": "Backed by evidence that matches the pin.",
+          "type": "string"
+        },
+        {
+          "const": "stale",
+          "description": "Needs review: evidence changed (living), the claimed text changed, or never reviewed.",
+          "type": "string"
+        },
+        {
+          "const": "broken",
+          "description": "Unresolvable: missing evidence, or the range no longer exists.",
+          "type": "string"
+        }
+      ]
+    },
+    "ClaimStatus": {
+      "description": "Status of one claim.",
+      "properties": {
+        "evidence": {
+          "description": "Referenced evidence keys.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "health": {
+          "$ref": "#/$defs/ClaimHealth",
+          "description": "Health."
+        },
+        "id": {
+          "description": "Claim id.",
+          "type": "string"
+        },
+        "lines": {
+          "description": "Lines of the subject the claim covers (1-based, inclusive), when resolvable.",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          ],
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "note": {
+          "description": "Note from the definition.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasons": {
+          "description": "Explanations.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "suggestion": {
+          "description": "Suggested fix (e.g. the new location of moved text).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "health",
+        "lines",
+        "evidence",
+        "reasons"
+      ],
+      "type": "object"
+    },
+    "CoverageCounts": {
+      "description": "Line counts per status (blank lines excluded).",
+      "properties": {
+        "broken": {
+          "description": "Broken lines.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "covered": {
+          "description": "Covered lines.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "primary": {
+          "description": "Primary lines.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stale": {
+          "description": "Stale lines.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uncovered": {
+          "description": "Uncovered lines.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "covered",
+        "primary",
+        "stale",
+        "broken",
+        "uncovered"
+      ],
+      "type": "object"
+    },
+    "CoverageSegment": {
+      "description": "A run of lines with the same status.",
+      "properties": {
+        "claims": {
+          "description": "Claims covering these lines.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "end": {
+          "description": "Last line (inclusive).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "description": "First line (1-based).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/LineStatus",
+          "description": "Status."
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "status",
+        "claims"
+      ],
+      "type": "object"
+    },
+    "LineStatus": {
+      "description": "Coverage status of a line. `uncovered` lines are inside no claim.",
+      "oneOf": [
+        {
+          "const": "uncovered",
+          "description": "Not inside any claim.",
+          "type": "string"
+        },
+        {
+          "const": "primary",
+          "description": "Primary information.",
+          "type": "string"
+        },
+        {
+          "const": "covered",
+          "description": "Backed by current evidence.",
+          "type": "string"
+        },
+        {
+          "const": "stale",
+          "description": "Needs review.",
+          "type": "string"
+        },
+        {
+          "const": "broken",
+          "description": "Unresolvable.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://evidence-cli.github.io/schemas/output/coverage.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "coverage": {
+      "description": "Coverage report of one authored subject.",
+      "properties": {
+        "claims": {
+          "description": "Claims.",
+          "items": {
+            "$ref": "#/$defs/ClaimStatus"
+          },
+          "type": "array"
+        },
+        "counts": {
+          "$ref": "#/$defs/CoverageCounts",
+          "description": "Line counts."
+        },
+        "evidence_ratio": {
+          "description": "Share of non-blank lines that are covered by current evidence.",
+          "format": "double",
+          "type": "number"
+        },
+        "id": {
+          "description": "Evidence id.",
+          "type": "string"
+        },
+        "lines": {
+          "description": "Per-line status, for rendering (index 0 = line 1).",
+          "items": {
+            "$ref": "#/$defs/LineStatus"
+          },
+          "type": "array"
+        },
+        "ratio": {
+          "description": "Share of non-blank lines that are covered or primary (0.0–1.0).",
+          "format": "double",
+          "type": "number"
+        },
+        "segments": {
+          "description": "Runs of lines.",
+          "items": {
+            "$ref": "#/$defs/CoverageSegment"
+          },
+          "type": "array"
+        },
+        "subject": {
+          "description": "Subject path relative to the root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "subject",
+        "ratio",
+        "evidence_ratio",
+        "counts",
+        "segments",
+        "claims",
+        "lines"
+      ],
+      "type": "object"
+    },
+    "version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "version",
+    "coverage"
+  ],
+  "title": "evidence --json coverage",
+  "type": "object"
+}

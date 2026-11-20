@@ -1,0 +1,40 @@
+[package]
+name = "evidence-cli"
+description = "Evidence: track provenance, freshness, and coverage of everything you collect, derive, and write"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["evidence", "provenance", "osint", "lineage", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "evidence"
+path = "src/main.rs"
+
+[features]
+default = ["index"]
+## The optional SQLite index (faster search). Without it, search scans the files.
+index = ["evidence-core/index"]
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+evidence-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+assert_fs.workspace = true
+insta.workspace = true
+jsonschema.workspace = true
+predicates.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

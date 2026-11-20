@@ -1,0 +1,80 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+# Fuzz targets need nightly and libFuzzer: `cargo +nightly fuzz run <target>` (see fuzz/).
+exclude = ["fuzz"]
+default-members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/evidence-cli/evidence"
+authors = ["Evidence contributors"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+# Targeted allows from `pedantic`.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+too_many_lines = "allow"
+struct_excessive_bools = "allow"
+similar_names = "allow"
+# Suggests an extra dependency for trivial counts.
+naive_bytecount = "allow"
+# `s += &format!(..)` reads better than `write!` + error handling for small text builders.
+format_push_string = "allow"
+
+[workspace.dependencies]
+# internal
+cas-fs = { path = "crates/cas-fs", version = "0.1.0" }
+span-select = { path = "crates/span-select", version = "0.1.0" }
+evidence-core = { path = "crates/evidence-core", version = "0.1.0" }
+
+# external
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+toml_edit = { version = "0.25", features = ["serde"] }
+schemars = "1"
+jsonschema = { version = "0.61", default-features = false }
+figment = { version = "0.10", features = ["toml", "env"] }
+jiff = { version = "1", features = ["serde"] }
+ignore = "0.4"
+sha2 = "0.10"
+hex = "0.4"
+tempfile = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4"
+pulldown-cmark = { version = "0.13", default-features = false }
+rusqlite = { version = "0.43", features = ["bundled"] }
+similar = "3"
+gpui = "0.2.2"
+# test
+insta = { version = "1", features = ["json", "yaml"] }
+proptest = "1"
+assert_cmd = "2"
+assert_fs = "1"
+predicates = "3"
+
+[profile.dev.package."*"]
+opt-level = 1

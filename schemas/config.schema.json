@@ -1,0 +1,106 @@
+{
+  "$defs": {
+    "DiscoveryConfig": {
+      "additionalProperties": false,
+      "description": "`[discovery]`",
+      "properties": {
+        "ignore": {
+          "description": "Additional gitignore-style patterns of paths to skip when looking for evidence files.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ExecutionConfig": {
+      "additionalProperties": false,
+      "description": "`[execution]`",
+      "properties": {
+        "jobs": {
+          "description": "Maximum number of pairs updated in parallel. Defaults to the number of CPUs.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timeout": {
+          "$ref": "#/$defs/Interval",
+          "description": "Default timeout of a single command (e.g. `10m`)."
+        }
+      },
+      "type": "object"
+    },
+    "IndexConfig": {
+      "additionalProperties": false,
+      "description": "`[index]`",
+      "properties": {
+        "enabled": {
+          "description": "Maintain `.evidence/index.db` automatically after changes. Defaults to `true`\nwhen the binary is built with index support.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "Interval": {
+      "description": "Duration such as `30m`, `6h`, `1d`, `2weeks`.",
+      "pattern": "^\\s*[0-9]+\\s*[a-zA-Z]+(\\s*[0-9]+\\s*[a-zA-Z]+)*\\s*$",
+      "type": "string"
+    },
+    "StoreConfig": {
+      "additionalProperties": false,
+      "description": "`[store]`",
+      "properties": {
+        "path": {
+          "description": "Object store directory. Relative paths are resolved against the project root.\nDefaults to `.evidence/objects`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "UserConfig": {
+      "additionalProperties": false,
+      "description": "`[user]`",
+      "properties": {
+        "name": {
+          "description": "Name recorded as `reviewed_by`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "https://evidence-cli.github.io/schemas/config.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Configuration of the `evidence` command (global, project, or project-local layer).",
+  "properties": {
+    "discovery": {
+      "$ref": "#/$defs/DiscoveryConfig",
+      "default": {},
+      "description": "Discovery of evidence files."
+    },
+    "execution": {
+      "$ref": "#/$defs/ExecutionConfig",
+      "default": {},
+      "description": "How runs are executed."
+    },
+    "index": {
+      "$ref": "#/$defs/IndexConfig",
+      "default": {},
+      "description": "Optional SQLite index."
+    },
+    "store": {
+      "$ref": "#/$defs/StoreConfig",
+      "default": {},
+      "description": "Snapshot object store."
+    },
+    "user": {
+      "$ref": "#/$defs/UserConfig",
+      "default": {},
+      "description": "Identity recorded in reviews."
+    }
+  },
+  "title": "Evidence configuration",
+  "type": "object"
+}

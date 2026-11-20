@@ -1,0 +1,49 @@
+{
+  "$id": "https://evidence-cli.github.io/schemas/output/index.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "index": {
+      "description": "Result of [`Project::refresh_index`].",
+      "properties": {
+        "indexed": {
+          "description": "Pairs (re-)indexed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Index file, relative to the project root.",
+          "type": "string"
+        },
+        "removed": {
+          "description": "Pairs removed from the index.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unchanged": {
+          "description": "Pairs unchanged.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "indexed",
+        "removed",
+        "unchanged"
+      ],
+      "type": "object"
+    },
+    "version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "version",
+    "index"
+  ],
+  "title": "evidence --json index rebuild, index sync",
+  "type": "object"
+}

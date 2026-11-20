@@ -1,0 +1,21 @@
+# Build output (also holds `cargo llvm-cov` reports)
+/target/
+
+# insta: snapshots awaiting review (`cargo insta review`)
+*.snap.new
+*.pending-snap
+
+# rustfmt backups
+**/*.rs.bk
+
+# Per-user editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Per-user agent settings (shared settings stay tracked)
+.claude/settings.local.json
+
+# fuzz/ keeps its own .gitignore (target, corpus, artifacts, coverage).
+# Cargo.lock and *.proptest-regressions are tracked on purpose.

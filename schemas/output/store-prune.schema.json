@@ -1,0 +1,44 @@
+{
+  "$id": "https://evidence-cli.github.io/schemas/output/store-prune.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "prune": {
+      "description": "Result of [`Project::prune_store`].",
+      "properties": {
+        "bytes_freed": {
+          "description": "Bytes freed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kept": {
+          "description": "Objects kept.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "removed": {
+          "description": "Objects removed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kept",
+        "removed",
+        "bytes_freed"
+      ],
+      "type": "object"
+    },
+    "version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "version",
+    "prune"
+  ],
+  "title": "evidence --json store prune",
+  "type": "object"
+}

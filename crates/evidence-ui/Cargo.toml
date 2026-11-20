@@ -1,0 +1,33 @@
+[package]
+name = "evidence-ui"
+description = "Desktop knowledge browser for Evidence projects (GPUI)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["evidence", "provenance", "gpui", "wiki"]
+categories = ["gui"]
+
+[[bin]]
+name = "evidence-ui"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[features]
+default = ["gui"]
+## The GPUI front end. Without it only the (tested) browsing layer is built.
+gui = ["dep:gpui", "dep:unicode-segmentation"]
+
+[dependencies]
+evidence-core.workspace = true
+gpui = { workspace = true, optional = true }
+similar.workspace = true
+unicode-segmentation = { version = "1", optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

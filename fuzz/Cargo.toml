@@ -1,0 +1,30 @@
+[package]
+name = "evidence-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+evidence-core = { path = "../crates/evidence-core", default-features = false }
+span-select = { path = "../crates/span-select" }
+
+# Not part of the main workspace (needs nightly + libFuzzer).
+[workspace]
+
+[[bin]]
+name = "evid_parse"
+path = "fuzz_targets/evid_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "selectors"
+path = "fuzz_targets/selectors.rs"
+test = false
+doc = false
+bench = false

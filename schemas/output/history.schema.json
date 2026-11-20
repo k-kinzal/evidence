@@ -1,0 +1,104 @@
+{
+  "$defs": {
+    "Event": {
+      "description": "One history record.",
+      "properties": {
+        "at": {
+          "description": "When it happened (RFC 3339).",
+          "type": "string"
+        },
+        "by": {
+          "description": "Who performed it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "claims": {
+          "description": "Claims reviewed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "duration_ms": {
+          "description": "Duration in milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "inputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Input snapshots used.",
+          "type": "object"
+        },
+        "locator": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Locator recorded by the run.",
+          "type": "object"
+        },
+        "message": {
+          "description": "Message (errors, notes).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation": {
+          "description": "`fetch`, `transform`, `generate`, `review`, `remove`.",
+          "type": "string"
+        },
+        "previous": {
+          "description": "Snapshot before the event.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "snapshot": {
+          "description": "Snapshot after the event.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "`changed`, `unchanged`, `failed`, `reviewed`, `removed`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "at",
+        "operation",
+        "status"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://evidence-cli.github.io/schemas/output/history.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "history": {
+      "items": {
+        "$ref": "#/$defs/Event"
+      },
+      "type": "array"
+    },
+    "version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "version",
+    "history"
+  ],
+  "title": "evidence --json history",
+  "type": "object"
+}

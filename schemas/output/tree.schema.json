@@ -1,0 +1,52 @@
+{
+  "$defs": {
+    "TreeNode": {
+      "description": "A node of a dependency tree.",
+      "properties": {
+        "children": {
+          "description": "Children: dependencies (or dependents when inverted).",
+          "items": {
+            "$ref": "#/$defs/TreeNode"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "Evidence id.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Kind.",
+          "type": "string"
+        },
+        "repeated": {
+          "description": "Already shown elsewhere in the tree (children omitted), like `cargo tree`'s `(*)`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://evidence-cli.github.io/schemas/output/tree.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "tree": {
+      "items": {
+        "$ref": "#/$defs/TreeNode"
+      },
+      "type": "array"
+    },
+    "version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "version",
+    "tree"
+  ],
+  "title": "evidence --json tree",
+  "type": "object"
+}

@@ -1,0 +1,62 @@
+{
+  "$defs": {
+    "Pinned": {
+      "description": "Result of pinning one pair.",
+      "properties": {
+        "id": {
+          "description": "Evidence id.",
+          "type": "string"
+        },
+        "pinned": {
+          "description": "Claims pinned.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "skipped": {
+          "description": "Claims that could not be pinned, with the reason.",
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "pinned",
+        "skipped"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://evidence-cli.github.io/schemas/output/review.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "review": {
+      "items": {
+        "$ref": "#/$defs/Pinned"
+      },
+      "type": "array"
+    },
+    "version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "version",
+    "review"
+  ],
+  "title": "evidence --json review",
+  "type": "object"
+}

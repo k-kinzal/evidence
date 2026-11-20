@@ -1,0 +1,19 @@
+# Raw findings from BigQuery
+version = 1
+kind = "source"
+id = "vulns-raw"
+title = "Raw vulnerability findings"
+tags = ["vuln", "raw"]
+
+[source]
+run = ["bq", "query", "--format=json", "--nouse_legacy_sql"]   # any program
+stdin = "queries/vulns.sql"
+stdout = true
+interval = "6h"
+locator = { project = "sec-prod", query = "queries/vulns.sql" }
+
+[verify]
+run = ["jq", "-e", "length > 0", "{output}"]
+
+[schema]
+json_schema = "schemas/vulns.schema.json"

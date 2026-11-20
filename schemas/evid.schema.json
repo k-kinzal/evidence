@@ -1,0 +1,745 @@
+{
+  "$defs": {
+    "Action": {
+      "additionalProperties": false,
+      "description": "A command (`[source]`, `[transform]`, `[generator]`, `[verify]`).\n\nEvidence runs commands; it has no built-in knowledge of any data source. Anything that can\nbe fetched or computed by a program (`curl`, `git`, `bq`, `jq`, an SBOM tool, an AI agent)\ncan be evidence. The program runs without a shell; placeholders such as `{output}` and\n`{input.NAME}` are expanded in `run`, `env`, `cwd`, and `locator` (see `docs/format.md`).",
+      "properties": {
+        "cwd": {
+          "description": "Working directory, relative to the evidence file. Defaults to its directory.",
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Extra environment variables for the program.",
+          "type": "object"
+        },
+        "interval": {
+          "$ref": "#/$defs/Interval",
+          "description": "`[source]` only: minimum time between refreshes by `evidence update` (e.g. `6h`,\n`1d`). Without an interval the source is refreshed only explicitly."
+        },
+        "locator": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LocatorValue"
+          },
+          "description": "Where the content came from, recorded in the state after each successful run: a fixed\nvalue (placeholders expanded) or a command whose trimmed standard output is the value,\ne.g. `commit = [\"git\", \"-C\", \"{output}\", \"rev-parse\", \"HEAD\"]`.",
+          "type": "object"
+        },
+        "run": {
+          "description": "Program and arguments, e.g. `[\"curl\", \"-sSfo\", \"{output}\", \"https://…\"]`.",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "stdin": {
+          "description": "File fed to the program's standard input (relative to the evidence file), e.g. a SQL\nquery or an AI prompt.",
+          "type": "string"
+        },
+        "stdout": {
+          "description": "Write the program's standard output to `{output}` (instead of the program writing it).",
+          "type": "boolean"
+        },
+        "timeout": {
+          "$ref": "#/$defs/Interval",
+          "description": "Kill the program after this long (default: `execution.timeout` from the config)."
+        }
+      },
+      "required": [
+        "run"
+      ],
+      "type": "object"
+    },
+    "Claim": {
+      "additionalProperties": false,
+      "description": "A claim: a range of the subject and the evidence it is based on.",
+      "properties": {
+        "evidence": {
+          "description": "Evidence backing the range. Empty only when `origin = \"primary\"`.",
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "Identifier, unique within the file.",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "type": "string"
+        },
+        "note": {
+          "description": "Free-form note (reasoning, caveats).",
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/Origin",
+          "description": "Declares the range as primary information."
+        },
+        "select": {
+          "$ref": "#/$defs/Selector",
+          "description": "The range of the subject this claim covers."
+        }
+      },
+      "required": [
+        "id",
+        "select"
+      ],
+      "type": "object"
+    },
+    "ClaimState": {
+      "additionalProperties": false,
+      "description": "Pins of one claim.",
+      "properties": {
+        "anchor": {
+          "description": "The claimed text at review time, used to re-anchor the claim after edits\n(only kept for short ranges).",
+          "type": "string"
+        },
+        "content": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "Hash of the claimed range of the subject at review time."
+        },
+        "evidence": {
+          "description": "Pinned evidence.",
+          "items": {
+            "$ref": "#/$defs/Pin"
+          },
+          "type": "array"
+        },
+        "reviewed_at": {
+          "$ref": "#/$defs/TimestampSchema",
+          "description": "When the claim was last reviewed."
+        },
+        "reviewed_by": {
+          "description": "Who reviewed it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reviewed_at",
+        "content"
+      ],
+      "type": "object"
+    },
+    "Definition": {
+      "additionalProperties": false,
+      "properties": {
+        "author": {
+          "description": "Who wrote an authored subject: `human`, `ai:<agent>`, a name, …",
+          "type": "string"
+        },
+        "claims": {
+          "description": "`authored`: ranges of the subject and the evidence they are based on.",
+          "items": {
+            "$ref": "#/$defs/Claim"
+          },
+          "type": "array"
+        },
+        "description": {
+          "description": "Longer description (Markdown).",
+          "type": "string"
+        },
+        "format": {
+          "$ref": "#/$defs/Format",
+          "description": "Subject format. Inferred from the subject's extension when omitted."
+        },
+        "generator": {
+          "$ref": "#/$defs/Action",
+          "description": "`authored`: optional command (e.g. an AI agent) that regenerates the subject."
+        },
+        "id": {
+          "description": "Stable identifier, unique within the project.",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "type": "string"
+        },
+        "inputs": {
+          "description": "`derived` (and `authored` generators): other evidence this subject is computed from.",
+          "items": {
+            "$ref": "#/$defs/InputRef"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/Kind",
+          "description": "What produces the subject."
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/Lifecycle",
+          "description": "How the subject relates to upstream change. Defaults to `living`."
+        },
+        "members": {
+          "$ref": "#/$defs/Members",
+          "description": "Makes the subject a list (a JSON array or JSONL) whose entries are kept as member\npairs, each generated from a template and updated on its own."
+        },
+        "origin": {
+          "$ref": "#/$defs/Origin",
+          "description": "`authored`: declares the whole subject as primary information (no upstream evidence)."
+        },
+        "schema": {
+          "$ref": "#/$defs/SchemaSpec",
+          "description": "Schema the subject must conform to."
+        },
+        "source": {
+          "$ref": "#/$defs/Action",
+          "description": "`source`: the command that acquires the subject."
+        },
+        "state": {
+          "$ref": "#/$defs/State",
+          "description": "Tool-managed state. Never edit by hand."
+        },
+        "subject": {
+          "description": "Where the subject lives: a path relative to this evidence file's directory, or\nabsolute. Defaults to this file's own path without `.evid` (the sidecar layout). A\nsubject outside the project works, but draws a `subject-outside-project` warning.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "tags": {
+          "description": "Free-form tags for search and grouping.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "description": "Short human-readable title.",
+          "type": "string"
+        },
+        "transform": {
+          "$ref": "#/$defs/Action",
+          "description": "`derived`: how the subject is computed from its inputs."
+        },
+        "verify": {
+          "$ref": "#/$defs/Action",
+          "description": "Optional check run on every new version of the subject before it is accepted."
+        },
+        "version": {
+          "description": "Format version. Must be `1`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "EvidenceDetail": {
+      "additionalProperties": false,
+      "description": "Detailed evidence reference.",
+      "properties": {
+        "path": {
+          "description": "For directory subjects: path of the file inside the directory.",
+          "type": "string"
+        },
+        "ref": {
+          "description": "Evidence id.",
+          "type": "string"
+        },
+        "select": {
+          "$ref": "#/$defs/Selector",
+          "description": "Part of the referenced subject; the claim only becomes stale when this part changes."
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "type": "object"
+    },
+    "EvidenceRef": {
+      "anyOf": [
+        {
+          "description": "Evidence id (the whole subject).",
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/EvidenceDetail",
+          "description": "Evidence id and a selector into its subject."
+        }
+      ],
+      "description": "A reference from a claim to evidence, optionally to a part of it."
+    },
+    "Format": {
+      "description": "Subject format.",
+      "oneOf": [
+        {
+          "const": "json",
+          "description": "JSON document.",
+          "type": "string"
+        },
+        {
+          "const": "jsonl",
+          "description": "JSON Lines (one JSON value per line); schemas apply to each line.",
+          "type": "string"
+        },
+        {
+          "const": "toml",
+          "description": "TOML document.",
+          "type": "string"
+        },
+        {
+          "const": "markdown",
+          "description": "Markdown text.",
+          "type": "string"
+        },
+        {
+          "const": "text",
+          "description": "Plain text.",
+          "type": "string"
+        },
+        {
+          "const": "directory",
+          "description": "A directory.",
+          "type": "string"
+        },
+        {
+          "const": "binary",
+          "description": "Opaque binary data.",
+          "type": "string"
+        }
+      ]
+    },
+    "InputDetail": {
+      "additionalProperties": false,
+      "description": "Detailed input reference.",
+      "properties": {
+        "as": {
+          "description": "Name used in placeholders (`{input.<name>}`); defaults to the id.",
+          "type": "string"
+        },
+        "ref": {
+          "description": "Evidence id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "type": "object"
+    },
+    "InputRef": {
+      "anyOf": [
+        {
+          "description": "Evidence id.",
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/InputDetail",
+          "description": "Evidence id with options."
+        }
+      ],
+      "description": "A dependency on another evidence (`inputs`)."
+    },
+    "Interval": {
+      "description": "Duration such as `30m`, `6h`, `1d`, `2weeks`.",
+      "pattern": "^\\s*[0-9]+\\s*[a-zA-Z]+(\\s*[0-9]+\\s*[a-zA-Z]+)*\\s*$",
+      "type": "string"
+    },
+    "Kind": {
+      "description": "Evidence kind.",
+      "oneOf": [
+        {
+          "const": "source",
+          "description": "Primary information acquired automatically by a command.",
+          "type": "string"
+        },
+        {
+          "const": "derived",
+          "description": "Deterministically computed from other evidence.",
+          "type": "string"
+        },
+        {
+          "const": "authored",
+          "description": "Written by a human or an AI.",
+          "type": "string"
+        }
+      ]
+    },
+    "LastRun": {
+      "additionalProperties": false,
+      "description": "Result of a run.",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/TimestampSchema",
+          "description": "When the run finished."
+        },
+        "message": {
+          "description": "Error or informational message.",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/RunStatus",
+          "description": "Result."
+        }
+      },
+      "required": [
+        "at",
+        "status"
+      ],
+      "type": "object"
+    },
+    "Lifecycle": {
+      "description": "How a subject relates to upstream change.",
+      "oneOf": [
+        {
+          "const": "snapshot",
+          "description": "One-off artifact pinned to the evidence it was written against; never becomes stale\nbecause of upstream change.",
+          "type": "string"
+        },
+        {
+          "const": "living",
+          "description": "Must track upstream; becomes stale when referenced evidence changes.",
+          "type": "string"
+        }
+      ]
+    },
+    "LineRange": {
+      "anyOf": [
+        {
+          "pattern": "^\\s*[1-9][0-9]*\\s*(-\\s*[1-9][0-9]*\\s*)?$",
+          "type": "string"
+        },
+        {
+          "minimum": 1,
+          "type": "integer"
+        }
+      ],
+      "description": "1-based inclusive line range: `N` or `START-END`."
+    },
+    "LocatorValue": {
+      "anyOf": [
+        {
+          "description": "A fixed value; placeholders except `{env.NAME}` are expanded.",
+          "type": "string"
+        },
+        {
+          "description": "A command (no shell) whose trimmed standard output is the value.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "A locator entry: a value or a command printing the value."
+    },
+    "Member": {
+      "description": "A member of a list. Its definition is composed from the parent's `[members]` template and the list entry; any other evidence file field overrides the template for this member only.",
+      "properties": {
+        "id": false,
+        "kind": false,
+        "member": {
+          "description": "Key of this member's entry in the parent's list.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "member_of": {
+          "description": "Id of the parent evidence, whose subject is the list.",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "type": "string"
+        },
+        "members": false,
+        "state": {
+          "$ref": "#/$defs/State"
+        },
+        "subject": false,
+        "version": {
+          "const": 1,
+          "description": "Format version. Must be `1`."
+        }
+      },
+      "required": [
+        "version",
+        "member_of",
+        "member"
+      ],
+      "type": "object"
+    },
+    "MemberState": {
+      "additionalProperties": false,
+      "description": "The list entry a member was produced from.",
+      "properties": {
+        "entry": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "Hash of the entry."
+        },
+        "fields": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Its top-level text, number, and boolean fields, so the member's definition can still be\ncomposed after the entry left the list.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "entry"
+      ],
+      "type": "object"
+    },
+    "Members": {
+      "additionalProperties": false,
+      "description": "`[members]` of a parent evidence file.",
+      "properties": {
+        "id": {
+          "description": "Id of each member, e.g. `space-{member.id}`. Use the key field so ids stay stable.",
+          "type": "string"
+        },
+        "key": {
+          "description": "JSON Pointer to the stable key of each list entry, e.g. `/id`. Members are matched to\nentries by this key, so a member keeps its history when other fields change.",
+          "pattern": "^(/.*)?$",
+          "type": "string"
+        },
+        "on_removed": {
+          "$ref": "#/$defs/OnRemoved",
+          "description": "What `evidence update` does with a member that is no longer listed. Default `keep`."
+        },
+        "subject": {
+          "description": "Subject of each member, relative to this evidence file's directory, e.g.\n`pages/{member.path}.md`. The member's evidence file is the sidecar of its subject.",
+          "type": "string"
+        },
+        "template": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Definition shared by every member: any evidence file field except `version`, `id`,\n`subject`, `members`, and `state`. `kind` defaults to `source`. Strings may use\n`{member.FIELD}` (a top-level text, number, or boolean field of the entry).",
+          "type": "object"
+        }
+      },
+      "required": [
+        "key",
+        "id",
+        "subject"
+      ],
+      "type": "object"
+    },
+    "OnRemoved": {
+      "description": "What happens to a member that is no longer listed.",
+      "oneOf": [
+        {
+          "const": "keep",
+          "description": "Keep it and report `member-removed` until it is removed with `evidence remove`.",
+          "type": "string"
+        },
+        {
+          "const": "delete",
+          "description": "Delete it, unless other evidence depends on it (then keep it and report it).",
+          "type": "string"
+        }
+      ]
+    },
+    "Origin": {
+      "description": "Declares content as primary information.",
+      "oneOf": [
+        {
+          "const": "primary",
+          "description": "Primary information: intentionally not backed by other evidence.",
+          "type": "string"
+        }
+      ]
+    },
+    "Pin": {
+      "additionalProperties": false,
+      "description": "One pinned evidence reference.",
+      "properties": {
+        "fragment": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "Hash of the selected fragment at pin time (when the reference has a selector or path)."
+        },
+        "key": {
+          "description": "Reference key (`id`, `id:path`, `id#selector`).",
+          "type": "string"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "Snapshot of the referenced subject at pin time."
+        }
+      },
+      "required": [
+        "key",
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "RunStatus": {
+      "description": "Result of a run.",
+      "oneOf": [
+        {
+          "const": "changed",
+          "description": "A new snapshot was accepted.",
+          "type": "string"
+        },
+        {
+          "const": "unchanged",
+          "description": "The run succeeded and the content did not change.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The run, schema validation, or verification failed; the previous snapshot was kept.",
+          "type": "string"
+        }
+      ]
+    },
+    "SchemaSpec": {
+      "additionalProperties": false,
+      "description": "Subject schema (`[schema]`).",
+      "properties": {
+        "json_schema": {
+          "description": "Path to a JSON Schema, relative to the evidence file.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "json_schema"
+      ],
+      "type": "object"
+    },
+    "Selector": {
+      "description": "Names a part of a document.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The whole document.",
+          "properties": {
+            "whole": {
+              "$ref": "#/$defs/WholeFlag"
+            }
+          },
+          "required": [
+            "whole"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A 1-based inclusive line range.",
+          "properties": {
+            "lines": {
+              "$ref": "#/$defs/LineRange"
+            }
+          },
+          "required": [
+            "lines"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A Markdown section by heading text. Leading `#`s, if given, also constrain the level.",
+          "properties": {
+            "heading": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "heading"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An RFC 6901 JSON Pointer.",
+          "properties": {
+            "json_pointer": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "json_pointer"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Lines between a `span:NAME` marker line and a `/span:NAME` marker line.",
+          "properties": {
+            "marker": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "marker"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SnapshotIdSchema": {
+      "description": "Content id: `sha256:` followed by 64 lowercase hex characters.",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "State": {
+      "additionalProperties": false,
+      "description": "State written by the tool after runs and reviews. Humans must not edit it.",
+      "properties": {
+        "checked_at": {
+          "$ref": "#/$defs/TimestampSchema",
+          "description": "When the subject was last successfully checked against its source (even if unchanged)."
+        },
+        "claims": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ClaimState"
+          },
+          "description": "Pins of each claim, recorded at review.",
+          "type": "object"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SnapshotIdSchema"
+          },
+          "description": "Snapshot of each input used by the last successful run.",
+          "type": "object"
+        },
+        "last_run": {
+          "$ref": "#/$defs/LastRun",
+          "description": "Result of the most recent run."
+        },
+        "locator": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Where the content came from (the evaluated `locator` table, e.g. a git commit).",
+          "type": "object"
+        },
+        "member": {
+          "$ref": "#/$defs/MemberState",
+          "description": "Members: the parent's list entry this member was last produced from."
+        },
+        "snapshot": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "Snapshot of the subject accepted by the last successful run or review."
+        },
+        "updated_at": {
+          "$ref": "#/$defs/TimestampSchema",
+          "description": "When the subject content last changed."
+        }
+      },
+      "type": "object"
+    },
+    "TimestampSchema": {
+      "description": "RFC 3339 timestamp in UTC.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "WholeFlag": {
+      "const": true,
+      "description": "Must be `true`.",
+      "type": "boolean"
+    }
+  },
+  "$id": "https://evidence-cli.github.io/schemas/evid.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Evidence file describing where a subject comes from. Usually a sidecar `<subject>.evid` next to the subject; `subject` places the subject elsewhere.",
+  "else": {
+    "$ref": "#/$defs/Definition"
+  },
+  "if": {
+    "required": [
+      "member_of"
+    ]
+  },
+  "then": {
+    "$ref": "#/$defs/Member"
+  },
+  "title": "Evidence file"
+}
