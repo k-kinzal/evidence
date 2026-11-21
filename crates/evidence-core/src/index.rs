@@ -15,7 +15,7 @@ use crate::project::IndexStats;
 use crate::search::Hit;
 use crate::workspace::{Pair, Workspace};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const MAX_CONTENT: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -54,7 +54,7 @@ impl Index {
         self.conn.execute_batch(
             "DROP TABLE IF EXISTS pairs; DROP TABLE IF EXISTS edges; DROP TABLE IF EXISTS history;
              DROP TABLE IF EXISTS fts;
-             CREATE TABLE pairs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT,
+             CREATE TABLE pairs (id TEXT PRIMARY KEY, content TEXT NOT NULL, title TEXT,
                  subject TEXT NOT NULL, fingerprint TEXT NOT NULL);
              CREATE VIRTUAL TABLE fts USING fts5(
                  id UNINDEXED, title, tags, description, path, content, tokenize = 'trigram');",
@@ -116,7 +116,7 @@ impl Index {
             .collect::<Vec<_>>()
             .join(" AND ");
         let mut stmt = self.conn.prepare(
-            "SELECT p.id, p.kind, p.title, p.subject,
+            "SELECT p.id, p.content, p.title, p.subject,
                     snippet(fts, 5, '', '', '…', 48), snippet(fts, -1, '', '', '…', 48), bm25(fts)
              FROM fts JOIN pairs p ON p.id = fts.id
              WHERE fts MATCH ?1 ORDER BY bm25(fts) LIMIT ?2",
@@ -132,7 +132,7 @@ impl Index {
             };
             Ok(Hit {
                 id: r.get(0)?,
-                kind: r.get(1)?,
+                content: r.get(1)?,
                 title: r.get(2)?,
                 subject: r.get(3)?,
                 field: field.into(),
@@ -167,9 +167,15 @@ fn index_pair(tx: &rusqlite::Transaction<'_>, pair: &Pair, fp: &str) -> Result<(
     let f = &pair.file;
     tx.execute("DELETE FROM fts WHERE id = ?1", params![pair.id])?;
     tx.execute(
-        "INSERT OR REPLACE INTO pairs (id, kind, title, subject, fingerprint)
+        "INSERT OR REPLACE INTO pairs (id, content, title, subject, fingerprint)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![pair.id, f.kind.as_str(), f.title, pair.subject_rel, fp],
+        params![
+            pair.id,
+            f.content_mode().as_str(),
+            f.title,
+            pair.subject_rel,
+            fp
+        ],
     )?;
     let content = if pair.format().is_text()
         && std::fs::metadata(&pair.subject_path)

@@ -12,7 +12,7 @@ mod theme;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use evidence_core::format::Kind;
+use evidence_core::format::ContentMode;
 use evidence_core::{Event, Health};
 use evidence_ui::{Browser, Content, Detail, DiffLine, Filter, PairRow};
 use gpui::{
@@ -211,12 +211,8 @@ fn health_badge(h: Health) -> gpui::Div {
     badge(h.as_str(), theme::health(h))
 }
 
-fn kind_label(k: Kind) -> &'static str {
-    match k {
-        Kind::Source => "source",
-        Kind::Derived => "derived",
-        Kind::Authored => "authored",
-    }
+fn content_label(c: ContentMode) -> &'static str {
+    c.as_str()
 }
 
 fn section(title: &str) -> gpui::Div {
@@ -413,12 +409,17 @@ impl EvidenceApp {
                             .child(row.id.clone()),
                     )
                     .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme::muted())
-                            .child(kind_label(row.kind)),
-                    ),
+                    .child(div().text_xs().text_color(theme::muted()).child(
+                        if row.productions.is_empty() {
+                            content_label(row.content).to_owned()
+                        } else {
+                            format!(
+                                "{} · {}",
+                                content_label(row.content),
+                                row.productions.join(", ")
+                            )
+                        },
+                    )),
             )
             .child(
                 div()
@@ -565,10 +566,16 @@ impl EvidenceApp {
                     .font_weight(FontWeight::BOLD)
                     .child(v.id.clone()),
             )
-            .child(badge(kind_label(v.definition.kind), theme::muted()))
+            .child(badge(
+                content_label(v.definition.content_mode()),
+                theme::muted(),
+            ))
             .child(health_badge(v.status.health));
-        if v.definition.kind == Kind::Authored {
-            title = title.child(badge(v.definition.lifecycle().to_string(), theme::muted()));
+        if v.working_differs {
+            title = title.child(badge("working file differs", theme::amber()));
+        }
+        if v.status.legacy {
+            title = title.child(badge("format v1", theme::amber()));
         }
         let mut header = div().flex().flex_col().child(title).child(
             div()
@@ -713,7 +720,7 @@ impl EvidenceApp {
                                 cov.ratio * 100.0,
                                 cov.evidence_ratio * 100.0
                             )))
-                            .child(badge(format!("covered {}", c.covered), theme::green()))
+                            .child(badge(format!("matched {}", c.matched), theme::green()))
                             .child(badge(format!("primary {}", c.primary), theme::blue()))
                             .child(badge(format!("stale {}", c.stale), theme::amber()))
                             .child(badge(format!("broken {}", c.broken), theme::red()))
@@ -832,7 +839,14 @@ impl EvidenceApp {
                     card = card.child(div().italic().child(note.clone()));
                 }
                 for r in &c.reasons {
-                    card = card.child(div().text_color(theme::claim(c.health)).child(r.clone()));
+                    card = card.child(
+                        div()
+                            .text_color(theme::claim(c.health))
+                            .child(r.message.clone()),
+                    );
+                }
+                for n in &c.notices {
+                    card = card.child(div().text_color(theme::blue()).child(n.message.clone()));
                 }
                 if let Some(s) = &c.suggestion {
                     card = card.child(div().text_color(theme::blue()).child(format!("hint: {s}")));
@@ -843,20 +857,31 @@ impl EvidenceApp {
         if let Some(state) = &v.definition.state {
             page = page.child(section("State"));
             let mut kv = Vec::new();
-            if let Some(s) = state.snapshot {
-                kv.push(("snapshot".to_owned(), s.to_string()));
+            if let Some(c) = &state.content {
+                kv.push(("adopted".to_owned(), c.snapshot.to_string()));
+                kv.push(("updated".to_owned(), c.updated_at.to_string()));
             }
-            if let Some(t) = state.updated_at {
-                kv.push(("updated".to_owned(), t.to_string()));
+            for (name, r) in &state.runs {
+                kv.push((format!("run {name}"), r.at.to_string()));
+                for (k, s) in &r.inputs {
+                    kv.push((format!("  input {k}"), s.snapshot.to_string()));
+                }
+                for (k, val) in &r.locator {
+                    kv.push((format!("  locator.{k}"), val.clone()));
+                }
             }
-            if let Some(t) = state.checked_at {
-                kv.push(("checked".to_owned(), t.to_string()));
+            for (name, f) in &state.failures {
+                kv.push((format!("failed {name}"), format!("{}: {}", f.at, f.message)));
             }
-            for (k, s) in &state.inputs {
-                kv.push((format!("input {k}"), s.to_string()));
-            }
-            for (k, val) in &state.locator {
-                kv.push((format!("locator.{k}"), val.clone()));
+            for f in &d.fixed {
+                let diff = f
+                    .notice
+                    .as_ref()
+                    .map_or_else(|| "same as current".to_owned(), |n| n.message.clone());
+                kv.push((
+                    format!("fixed {}", f.key),
+                    format!("{} — {diff}", f.revision),
+                ));
             }
             for (k, val) in kv {
                 page = page.child(

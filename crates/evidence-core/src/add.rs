@@ -3,11 +3,38 @@
 use std::path::{Path, PathBuf};
 
 use crate::format::document::{self, valid_id};
-use crate::format::{Kind, Lifecycle};
+use serde::Serialize;
 
 use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::workspace::{Workspace, inside, normalize};
+
+/// Starting point of a new evidence file. A template only decides what is written; no kind
+/// is recorded (format version 2 has none).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Template {
+    /// A production `fetch` that writes the subject (no inputs).
+    Source,
+    /// A production `transform` that writes the subject from inputs.
+    Derived,
+    /// An editable subject with commented example claims (with `run`: a production
+    /// `generate` that writes the subject).
+    #[default]
+    Authored,
+}
+
+impl Template {
+    /// Parses `source`, `derived`, or `authored`.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "source" => Some(Self::Source),
+            "derived" => Some(Self::Derived),
+            "authored" => Some(Self::Authored),
+            _ => None,
+        }
+    }
+}
 
 /// Options of [`add`].
 #[derive(Debug, Clone)]
@@ -17,23 +44,20 @@ pub struct AddOptions {
     /// Where to write the evidence file. Defaults to `<subject>.evid` next to the subject;
     /// elsewhere, the file records the subject's location in `subject`.
     pub evid: Option<PathBuf>,
-    /// Kind.
-    pub kind: Kind,
+    /// Template.
+    pub template: Template,
     /// Id (defaults to one derived from the file name).
     pub id: Option<String>,
     /// Title.
     pub title: Option<String>,
-    /// Command (program and arguments) for `[source]`, `[transform]`, or an authored
-    /// `[generator]`.
+    /// Command (program and arguments) of the production.
     pub run: Vec<String>,
     /// Capture the command's standard output as the subject.
     pub stdout: bool,
-    /// Inputs (derived).
+    /// Inputs of the production.
     pub inputs: Vec<String>,
-    /// Refresh interval (source).
+    /// Refresh interval of the production.
     pub interval: Option<String>,
-    /// Lifecycle (authored/derived).
-    pub lifecycle: Option<Lifecycle>,
     /// Tags.
     pub tags: Vec<String>,
 }
@@ -86,8 +110,7 @@ pub(crate) fn add(layout: &Layout, cwd: &Path, opts: &AddOptions) -> Result<Path
 
     let q = |s: &str| toml_edit::Value::from(s).to_string();
     let mut text = String::new();
-    text.push_str("version = 1\n");
-    text.push_str(&format!("kind = \"{}\"\n", opts.kind));
+    text.push_str("version = 2\n");
     text.push_str(&format!("id = {}\n", q(&id)));
     if let Some(t) = &opts.title {
         text.push_str(&format!("title = {}\n", q(t)));
@@ -99,15 +122,10 @@ pub(crate) fn add(layout: &Layout, cwd: &Path, opts: &AddOptions) -> Result<Path
         let tags: Vec<String> = opts.tags.iter().map(|t| q(t)).collect();
         text.push_str(&format!("tags = [{}]\n", tags.join(", ")));
     }
-    if let Some(l) = opts.lifecycle {
-        text.push_str(&format!("lifecycle = \"{l}\"\n"));
-    }
-    if !opts.inputs.is_empty() {
-        let inputs: Vec<String> = opts.inputs.iter().map(|t| q(t)).collect();
-        text.push_str(&format!("inputs = [{}]\n", inputs.join(", ")));
-    }
-    let command = |text: &mut String, table: &str| {
-        text.push_str(&format!("\n[{table}]\n"));
+    let production = |text: &mut String, name: &str| {
+        text.push_str(&format!(
+            "\n[[productions]]\nname = \"{name}\"\nwrites = [\"subject\"]\n"
+        ));
         if opts.run.is_empty() {
             text.push_str(
                 "run = [\"program\", \"--write-to\", \"{output}\"]   # TODO: the command\n",
@@ -119,30 +137,32 @@ pub(crate) fn add(layout: &Layout, cwd: &Path, opts: &AddOptions) -> Result<Path
         if opts.stdout {
             text.push_str("stdout = true\n");
         }
-    };
-    match opts.kind {
-        Kind::Source => {
-            command(&mut text, "source");
-            if let Some(i) = &opts.interval {
-                text.push_str(&format!("interval = {}\n", q(i)));
-            }
+        if !opts.inputs.is_empty() {
+            let inputs: Vec<String> = opts.inputs.iter().map(|t| q(t)).collect();
+            text.push_str(&format!("inputs = [{}]\n", inputs.join(", ")));
         }
-        Kind::Derived => command(&mut text, "transform"),
-        Kind::Authored => {
-            if !opts.run.is_empty() {
-                command(&mut text, "generator");
+        if let Some(i) = &opts.interval {
+            text.push_str(&format!("interval = {}\n", q(i)));
+        }
+    };
+    match opts.template {
+        Template::Source => production(&mut text, "fetch"),
+        Template::Derived => production(&mut text, "transform"),
+        Template::Authored => {
+            if !opts.run.is_empty() || !opts.inputs.is_empty() {
+                production(&mut text, "generate");
             }
             text.push_str(
-                "\n# Map ranges of the document to the evidence they are based on:\n\
+                "\n# Map ranges of the subject to the evidence they are based on, then pin them\n\
+                 # with `evidence update --pin <this file>`:\n\
                  # [[claims]]\n\
                  # id = \"summary\"\n\
                  # select = { heading = \"## Summary\" }   # or { lines = \"10-20\" }, { marker = \"name\" }\n\
-                 # evidence = [\"other-evidence-id\"]\n\
+                 # evidence = [\"other-evidence-id\"]     # or { ref = \"id\", revision = \"sha256:…\" }\n\
                  #\n\
-                 # [[claims]]\n\
-                 # id = \"background\"\n\
-                 # select = { heading = \"## Background\" }\n\
-                 # origin = \"primary\"                      # not backed by evidence\n",
+                 # Ranges that need no evidence:\n\
+                 # [[primary]]\n\
+                 # select = { heading = \"## Background\" }\n",
             );
         }
     }

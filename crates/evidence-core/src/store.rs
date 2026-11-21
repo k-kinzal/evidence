@@ -9,17 +9,39 @@ use crate::history;
 use crate::layout::Layout;
 use crate::workspace::Workspace;
 
-/// Snapshot ids referenced by evidence files (current snapshots, inputs, pins).
+/// Snapshot ids the current project needs (GC roots): adopted content, the inputs of run
+/// records, the subject and reference versions of pins, and every fixed revision written in
+/// a definition (even without any state).
 pub(crate) fn referenced_snapshots(ws: &Workspace) -> HashSet<ObjectId> {
     let mut out = HashSet::new();
     for pair in ws.pairs() {
+        for production in &pair.file.productions {
+            out.extend(
+                production
+                    .inputs
+                    .iter()
+                    .filter_map(crate::format::Reference::revision),
+            );
+        }
+        for (claim, _) in pair.file.all_claims() {
+            out.extend(
+                claim
+                    .evidence
+                    .iter()
+                    .filter_map(crate::format::Reference::revision),
+            );
+        }
         let Some(state) = &pair.file.state else {
             continue;
         };
-        out.extend(state.snapshot);
-        out.extend(state.inputs.values().copied());
-        for claim in state.claims.values() {
-            out.extend(claim.evidence.iter().map(|p| p.snapshot));
+        out.extend(state.content.as_ref().map(|c| c.snapshot));
+        for run in state.runs.values() {
+            out.extend(run.subject);
+            out.extend(run.inputs.values().map(|i| i.snapshot));
+        }
+        for pin in state.pins.values() {
+            out.extend(pin.content.snapshot);
+            out.extend(pin.evidence.iter().map(|p| p.snapshot));
         }
     }
     out

@@ -1,8 +1,8 @@
-version = 1
-kind = "derived"
+version = 2
 id = "vulns-filtered"
 
-inputs = ["vulns-raw", { ref = "sbom-app", as = "sbom" }]
-
-[transform]
+[[productions]]
+name = "transform"
+writes = ["subject"]
 run = ["vuln-filter", "--vulns", "{input.vulns-raw}", "--sbom", "{input.sbom}", "-o", "{output}"]
+inputs = ["vulns-raw", { ref = "sbom-app", as = "sbom" }]

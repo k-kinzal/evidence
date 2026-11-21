@@ -1,4 +1,8 @@
 //! Reading, validating, and writing evidence files.
+//!
+//! Format version 2 files are parsed into [`EvidenceFile`]. Version 1 files are parsed with
+//! the rules of version 1 and converted in memory (see [`crate::format::v1`]), so status
+//! and the other read-only commands work before migration; the tool refuses to write to them.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -8,12 +12,14 @@ use serde::Serialize;
 
 use crate::format::diagnostic::Diagnostic;
 use crate::format::evid::{
-    Action, EvidenceFile, FORMAT_VERSION, InputRef, Kind, LocatorValue, Origin,
+    Action, EvidenceFile, FORMAT_VERSION, LocatorValue, Production, Reference, in_namespace,
+    namespaces_overlap,
 };
 use crate::format::member::MemberFile;
 use crate::format::schema;
 use crate::format::state::State;
 use crate::format::template::{self, Placeholder};
+use crate::format::v1;
 
 /// Comment written above the tool-managed `[state]` table.
 pub(crate) const STATE_COMMENT: &str =
@@ -45,11 +51,13 @@ pub fn evid_path(subject: &Path) -> PathBuf {
 /// Result of parsing an evidence file.
 #[derive(Debug, Clone)]
 pub struct Parsed {
-    /// The parsed file, if it could be read at all.
+    /// The parsed file (for a version 1 file: its in-memory version 2 conversion).
     pub file: Option<EvidenceFile>,
     /// A member evidence file (`member_of = …`) instead: its definition is composed from the
     /// parent's `[members]` template when the project is loaded.
     pub member: Option<MemberFile>,
+    /// Set when the file is format version 1: the original, for migration.
+    pub legacy: Option<Box<v1::EvidenceFile>>,
     /// Problems found (errors and warnings).
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -59,78 +67,79 @@ impl Parsed {
     pub fn has_errors(&self) -> bool {
         self.diagnostics.iter().any(Diagnostic::is_error)
     }
+
+    fn only(diagnostics: Vec<Diagnostic>) -> Self {
+        Self {
+            file: None,
+            member: None,
+            legacy: None,
+            diagnostics,
+        }
+    }
+}
+
+/// Finds lines of JSON Pointers in a TOML document.
+pub(crate) struct Lines<'a> {
+    text: &'a str,
+    doc: &'a toml_edit::Document<&'a str>,
+}
+
+impl Lines<'_> {
+    /// Labels a diagnostic with `path` and the line of its pointer.
+    pub(crate) fn locate(&self, d: Diagnostic, path: &Path) -> Diagnostic {
+        let line = d
+            .pointer
+            .as_deref()
+            .and_then(|p| span_of_pointer(self.doc, p))
+            .map(|s| line_of(self.text, s));
+        d.in_file(path).at_line(line)
+    }
 }
 
 /// Parses and validates evidence file `text` (structure, JSON Schema, and file-local rules).
 ///
 /// `path` is only used to label diagnostics.
 pub fn parse(text: &str, path: &Path) -> Parsed {
-    let mut diagnostics = Vec::new();
     let doc = match toml_edit::Document::parse(text) {
         Ok(doc) => doc,
         Err(e) => {
             let line = e.span().map(|s| line_of(text, s.start));
-            diagnostics.push(
+            return Parsed::only(vec![
                 Diagnostic::error("toml", e.message().to_owned())
                     .in_file(path)
                     .at_line(line),
-            );
+            ]);
+        }
+    };
+    let lines = Lines { text, doc: &doc };
+    let json = match toml::from_str::<serde_json::Value>(text) {
+        Ok(json) => json,
+        Err(e) => {
+            return Parsed::only(vec![Diagnostic::error("toml", e.to_string()).in_file(path)]);
+        }
+    };
+    match MemberFile::from_json(&json) {
+        Some(Ok(member)) => {
             return Parsed {
                 file: None,
-                member: None,
-                diagnostics,
+                member: Some(member),
+                legacy: None,
+                diagnostics: Vec::new(),
             };
         }
-    };
-    let locate = |d: Diagnostic| {
-        let line = d
-            .pointer
-            .as_deref()
-            .and_then(|p| span_of_pointer(&doc, p))
-            .map(|s| line_of(text, s));
-        d.in_file(path).at_line(line)
-    };
-
-    // 1. JSON Schema validation of the whole document (member files have their own rules).
-    match toml::from_str::<serde_json::Value>(text) {
-        Ok(json) => {
-            match MemberFile::from_json(&json) {
-                Some(Ok(member)) => {
-                    return Parsed {
-                        file: None,
-                        member: Some(member),
-                        diagnostics,
-                    };
-                }
-                Some(Err(errors)) => {
-                    return Parsed {
-                        file: None,
-                        member: None,
-                        diagnostics: errors.into_iter().map(locate).collect(),
-                    };
-                }
-                None => {}
-            }
-            for error in evid_validator().iter_errors(&json) {
-                let pointer = error.instance_path().to_string();
-                let line = span_of_pointer(&doc, &pointer).map(|s| line_of(text, s));
-                let message = match error.kind() {
-                    jsonschema::error::ValidationErrorKind::Pattern { .. } => {
-                        pattern_message(&pointer, error.instance())
-                    }
-                    _ => error.to_string(),
-                };
-                diagnostics.push(
-                    Diagnostic::error("schema", message)
-                        .in_file(path)
-                        .at_line(line)
-                        .at_pointer(pointer),
-                );
-            }
+        Some(Err(errors)) => {
+            return Parsed::only(errors.into_iter().map(|d| lines.locate(d, path)).collect());
         }
-        Err(e) => diagnostics.push(Diagnostic::error("toml", e.to_string()).in_file(path)),
+        None => {}
+    }
+    if json.get("version").and_then(serde_json::Value::as_u64)
+        == Some(u64::from(v1::FORMAT_VERSION))
+    {
+        return parse_v1(text, &json, &lines, path);
     }
 
+    // 1. JSON Schema validation of the whole document.
+    let mut diagnostics = schema_errors(evid_validator(), &json, &lines, path);
     // 2. Typed deserialization.
     let file = match toml::from_str::<EvidenceFile>(text) {
         Ok(file) => Some(file),
@@ -146,28 +155,96 @@ pub fn parse(text: &str, path: &Path) -> Parsed {
             None
         }
     };
-
     // 3. File-local semantic rules.
     if let Some(file) = &file {
-        diagnostics.extend(check(file).into_iter().map(locate));
-        // A semantic check explains a problem better than the schema error at the same place.
-        let semantic: Vec<String> = diagnostics
-            .iter()
-            .filter(|d| d.code != "schema")
-            .filter_map(|d| d.pointer.clone())
-            .collect();
-        diagnostics.retain(|d| {
-            d.code != "schema" || d.pointer.as_ref().is_none_or(|p| !semantic.contains(p))
-        });
+        diagnostics.extend(check(file).into_iter().map(|d| lines.locate(d, path)));
+        prefer_semantic(&mut diagnostics);
     }
     Parsed {
         file,
         member: None,
+        legacy: None,
         diagnostics,
     }
 }
 
-/// Validates and checks a definition given as JSON (a composed member), like [`parse`].
+/// A version 1 file: validated by the version 1 rules, then converted in memory.
+fn parse_v1(text: &str, json: &serde_json::Value, lines: &Lines<'_>, path: &Path) -> Parsed {
+    let mut diagnostics = schema_errors(v1::validator(), json, lines, path);
+    let legacy = match toml::from_str::<v1::EvidenceFile>(text) {
+        Ok(file) => file,
+        Err(e) => {
+            if diagnostics.is_empty() {
+                let line = e.span().map(|s| line_of(text, s.start));
+                diagnostics.push(
+                    Diagnostic::error("toml", e.message().to_owned())
+                        .in_file(path)
+                        .at_line(line),
+                );
+            }
+            return Parsed::only(diagnostics);
+        }
+    };
+    diagnostics.extend(
+        v1::check(&legacy)
+            .into_iter()
+            .map(|d| lines.locate(d, path)),
+    );
+    prefer_semantic(&mut diagnostics);
+    let converted = v1::to_v2(&legacy);
+    diagnostics.push(
+        Diagnostic::warning(
+            "legacy-format",
+            "format version 1: read-only until migrated with `evidence migrate`",
+        )
+        .in_file(path)
+        .at_pointer("/version"),
+    );
+    diagnostics.extend(converted.issues.into_iter().map(|d| lines.locate(d, path)));
+    Parsed {
+        file: Some(converted.file),
+        member: None,
+        legacy: Some(Box::new(legacy)),
+        diagnostics,
+    }
+}
+
+fn schema_errors(
+    validator: &jsonschema::Validator,
+    json: &serde_json::Value,
+    lines: &Lines<'_>,
+    path: &Path,
+) -> Vec<Diagnostic> {
+    validator
+        .iter_errors(json)
+        .map(|error| {
+            let pointer = error.instance_path().to_string();
+            let message = match error.kind() {
+                jsonschema::error::ValidationErrorKind::Pattern { .. } => {
+                    pattern_message(&pointer, error.instance())
+                }
+                _ => error.to_string(),
+            };
+            lines.locate(
+                Diagnostic::error("schema", message).at_pointer(pointer),
+                path,
+            )
+        })
+        .collect()
+}
+
+/// A semantic check explains a problem better than the schema error at the same place.
+fn prefer_semantic(diagnostics: &mut Vec<Diagnostic>) {
+    let semantic: Vec<String> = diagnostics
+        .iter()
+        .filter(|d| d.code != "schema")
+        .filter_map(|d| d.pointer.clone())
+        .collect();
+    diagnostics
+        .retain(|d| d.code != "schema" || d.pointer.as_ref().is_none_or(|p| !semantic.contains(p)));
+}
+
+/// Validates and checks a version 2 definition given as JSON (a composed member).
 pub(crate) fn from_json(doc: &serde_json::Value) -> (Option<EvidenceFile>, Vec<Diagnostic>) {
     let mut diagnostics: Vec<Diagnostic> = evid_validator()
         .iter_errors(doc)
@@ -189,7 +266,7 @@ pub(crate) fn from_json(doc: &serde_json::Value) -> (Option<EvidenceFile>, Vec<D
 }
 
 /// Readable message for a failed `pattern` (the regex itself helps nobody).
-fn pattern_message(pointer: &str, value: &serde_json::Value) -> String {
+pub(crate) fn pattern_message(pointer: &str, value: &serde_json::Value) -> String {
     let field = pointer.rsplit('/').next().unwrap_or_default();
     let shown = value
         .as_str()
@@ -198,9 +275,13 @@ fn pattern_message(pointer: &str, value: &serde_json::Value) -> String {
         "interval" | "timeout" => {
             format!("invalid duration {shown}: use e.g. `30m`, `6h`, `1d`, `2weeks`, `1h 30m`")
         }
-        "id" | "ref" => format!(
+        "id" | "ref" | "name" => format!(
             "invalid id {shown}: use lowercase letters, digits, `.`, `_`, `-` (starting with a letter or digit)"
         ),
+        "revision" => format!("invalid revision {shown}: use a snapshot id `sha256:…`"),
+        "namespace" => {
+            format!("invalid namespace {shown}: use dot-separated names of letters and digits")
+        }
         "lines" => format!("invalid line range {shown}: use `12` or `40-58`"),
         _ => format!("invalid value {shown} for `{field}`"),
     }
@@ -210,11 +291,7 @@ fn pattern_message(pointer: &str, value: &serde_json::Value) -> String {
 pub(crate) fn read(path: &Path) -> Parsed {
     match std::fs::read_to_string(path) {
         Ok(text) => parse(&text, path),
-        Err(e) => Parsed {
-            file: None,
-            member: None,
-            diagnostics: vec![Diagnostic::error("io", e.to_string()).in_file(path)],
-        },
+        Err(e) => Parsed::only(vec![Diagnostic::error("io", e.to_string()).in_file(path)]),
     }
 }
 
@@ -227,11 +304,10 @@ fn evid_validator() -> &'static jsonschema::Validator {
     })
 }
 
-/// File-local semantic rules that JSON Schema cannot express.
+/// File-local semantic rules of version 2 that JSON Schema cannot express.
 pub(crate) fn check(file: &EvidenceFile) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let err = |code, msg: String, ptr: &str| Diagnostic::error(code, msg).at_pointer(ptr);
-    let warn = |code, msg: String, ptr: &str| Diagnostic::warning(code, msg).at_pointer(ptr);
 
     if file.version != FORMAT_VERSION {
         out.push(err(
@@ -262,105 +338,164 @@ pub(crate) fn check(file: &EvidenceFile) -> Vec<Diagnostic> {
             "/subject",
         ));
     }
-    let forbid = |out: &mut Vec<Diagnostic>, present: bool, field: &str| {
-        if present {
+
+    // Productions.
+    let mut names = HashSet::new();
+    let mut namespaces: Vec<(&str, usize)> = Vec::new();
+    let writers: Vec<usize> = (0..file.productions.len())
+        .filter(|&i| file.productions[i].writes_subject())
+        .collect();
+    if writers.len() > 1 {
+        out.push(err(
+            "subject-writers",
+            format!(
+                "{} productions write the subject ({}); at most one may",
+                writers.len(),
+                writers
+                    .iter()
+                    .map(|&i| format!("`{}`", file.productions[i].name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            &format!("/productions/{}", writers[1]),
+        ));
+    }
+    for (i, p) in file.productions.iter().enumerate() {
+        let ptr = format!("/productions/{i}");
+        if !names.insert(p.name.as_str()) {
             out.push(err(
-                "kind-field",
-                format!("`{field}` is not allowed for kind `{}`", file.kind),
-                &format!("/{field}"),
+                "duplicate",
+                format!("production name `{}` is used twice", p.name),
+                &format!("{ptr}/name"),
             ));
         }
-    };
-    match file.kind {
-        Kind::Source => {
-            if file.source.is_none() {
+        let mut seen = HashSet::new();
+        for o in &p.writes {
+            if !seen.insert(*o) {
                 out.push(err(
-                    "kind-field",
-                    "kind `source` requires a `[source]` table".into(),
-                    "",
+                    "production",
+                    format!("`writes` of `{}` lists an output twice", p.name),
+                    &format!("{ptr}/writes"),
                 ));
             }
-            forbid(&mut out, file.transform.is_some(), "transform");
-            forbid(&mut out, file.generator.is_some(), "generator");
-            forbid(&mut out, !file.claims.is_empty(), "claims");
-            forbid(&mut out, !file.inputs.is_empty(), "inputs");
-            forbid(&mut out, file.lifecycle.is_some(), "lifecycle");
-            forbid(&mut out, file.origin.is_some(), "origin");
         }
-        Kind::Derived => {
-            if file.transform.is_none() {
-                out.push(err(
-                    "kind-field",
-                    "kind `derived` requires a `[transform]` table".into(),
-                    "",
-                ));
-            }
-            if file.inputs.is_empty() {
-                out.push(err(
-                    "kind-field",
-                    "kind `derived` requires at least one input".into(),
-                    "",
-                ));
-            }
-            forbid(&mut out, file.source.is_some(), "source");
-            forbid(&mut out, file.generator.is_some(), "generator");
-            forbid(&mut out, !file.claims.is_empty(), "claims");
-            forbid(&mut out, file.origin.is_some(), "origin");
+        if p.writes.is_empty() {
+            out.push(err(
+                "production",
+                format!(
+                    "`writes` of `{}` must name `subject`, `claims`, or both",
+                    p.name
+                ),
+                &format!("{ptr}/writes"),
+            ));
         }
-        Kind::Authored => {
-            forbid(&mut out, file.source.is_some(), "source");
-            forbid(&mut out, file.transform.is_some(), "transform");
-            if file.claims.is_empty() && file.origin.is_none() {
-                out.push(warn(
-                    "no-claims",
-                    "authored subject has no claims and no `origin`; its coverage is 0%".into(),
-                    "",
+        match (&p.namespace, p.writes_claims()) {
+            (None, true) => out.push(err(
+                "namespace",
+                format!(
+                    "production `{}` writes claims and needs a `namespace`",
+                    p.name
+                ),
+                &ptr,
+            )),
+            (Some(_), false) => out.push(err(
+                "namespace",
+                format!(
+                    "production `{}` has a `namespace` but does not write claims",
+                    p.name
+                ),
+                &format!("{ptr}/namespace"),
+            )),
+            (Some(ns), true) => {
+                for (other, j) in &namespaces {
+                    if namespaces_overlap(ns, other) {
+                        out.push(err(
+                            "namespace",
+                            format!(
+                                "namespace `{ns}` overlaps `{other}` of production `{}`",
+                                file.productions[*j].name
+                            ),
+                            &format!("{ptr}/namespace"),
+                        ));
+                    }
+                }
+                namespaces.push((ns, i));
+            }
+            (None, false) => {}
+        }
+        let mut input_names = HashSet::new();
+        for (j, input) in p.inputs.iter().enumerate() {
+            let iptr = format!("{ptr}/inputs/{j}");
+            if !input_names.insert(input.name()) {
+                out.push(err(
+                    "duplicate",
+                    format!("input name `{}` is used twice", input.name()),
+                    &iptr,
                 ));
             }
-            if file.origin == Some(Origin::Primary) && !file.claims.is_empty() {
-                out.push(warn(
-                    "origin-and-claims",
-                    "`origin = \"primary\"` applies to the whole subject; claims only refine it"
-                        .into(),
-                    "/origin",
+            if input.satisfies().is_some() {
+                out.push(err(
+                    "reference",
+                    "`satisfies` belongs in claim references, not inputs".into(),
+                    &format!("{iptr}/satisfies"),
                 ));
             }
+            if input.id() == file.id && p.writes_subject() && !input.is_fixed() {
+                out.push(err(
+                    "cycle",
+                    format!(
+                        "production `{}` writes the subject and cannot read its current version \
+                         as an input",
+                        p.name
+                    ),
+                    &iptr,
+                ));
+            }
+        }
+        check_action(p, &p.action(), &ptr, ActionKind::Production, &mut out);
+    }
+    if let Some(verify) = &file.verify {
+        let probe = Production {
+            name: "verify".into(),
+            writes: vec![crate::format::Output::Subject],
+            namespace: None,
+            run: verify.run.clone(),
+            stdout: false,
+            stdin: None,
+            env: std::collections::BTreeMap::new(),
+            cwd: None,
+            timeout: None,
+            interval: None,
+            inputs: Vec::new(),
+            locator: std::collections::BTreeMap::new(),
+        };
+        check_action(&probe, verify, "/verify", ActionKind::Verify, &mut out);
+        if writers.is_empty() {
+            out.push(
+                Diagnostic::warning(
+                    "verify-unused",
+                    "`[verify]` checks new subject versions, but no production writes the subject",
+                )
+                .at_pointer("/verify"),
+            );
         }
     }
-
-    for (table, action) in [
-        ("source", &file.source),
-        ("transform", &file.transform),
-        ("generator", &file.generator),
-        ("verify", &file.verify),
-    ] {
-        if let Some(action) = action {
-            check_action(file, table, action, &mut out);
-        }
+    if file.schema.is_some() && writers.is_empty() {
+        out.push(
+            Diagnostic::warning(
+                "schema-unused",
+                "`[schema]` checks new subject versions, but no production writes the subject"
+                    .to_owned(),
+            )
+            .at_pointer("/schema"),
+        );
     }
 
     if let Some(members) = &file.members {
         out.extend(members.check());
     }
 
-    let mut seen_inputs = HashSet::new();
-    for (i, input) in file.inputs.iter().enumerate() {
-        if !seen_inputs.insert(input.name()) {
-            out.push(err(
-                "duplicate",
-                format!("input name `{}` is used twice", input.name()),
-                &format!("/inputs/{i}"),
-            ));
-        }
-        if input.id() == file.id {
-            out.push(err(
-                "cycle",
-                "an evidence cannot be its own input".into(),
-                &format!("/inputs/{i}"),
-            ));
-        }
-    }
-
+    // Claims.
     let mut seen_claims = HashSet::new();
     for (i, claim) in file.claims.iter().enumerate() {
         let ptr = format!("/claims/{i}");
@@ -371,55 +506,83 @@ pub(crate) fn check(file: &EvidenceFile) -> Vec<Diagnostic> {
                 &ptr,
             ));
         }
-        match (claim.evidence.is_empty(), claim.origin) {
-            (true, None) => out.push(err(
+        if claim.evidence.is_empty() {
+            out.push(err(
                 "claim",
                 format!(
-                    "claim `{}` needs `evidence` or `origin = \"primary\"`",
+                    "claim `{}` needs `evidence`; declare primary information with `[[primary]]`",
                     claim.id
                 ),
                 &ptr,
-            )),
-            (false, Some(_)) => out.push(err(
-                "claim",
-                format!(
-                    "claim `{}` has both `evidence` and `origin`; choose one",
-                    claim.id
-                ),
-                &ptr,
-            )),
-            _ => {}
+            ));
         }
-        for (j, ev) in claim.evidence.iter().enumerate() {
-            if ev.id() == file.id {
-                out.push(err(
-                    "cycle",
-                    "a claim cannot reference its own evidence file".into(),
-                    &format!("{ptr}/evidence/{j}"),
-                ));
+        if let Some((ns, j)) = namespaces
+            .iter()
+            .find(|(ns, _)| in_namespace(ns, &claim.id))
+        {
+            out.push(err(
+                "namespace",
+                format!(
+                    "claim `{}` lies in namespace `{ns}` of production `{}`; hand-written claims \
+                     must use other ids",
+                    claim.id, file.productions[*j].name
+                ),
+                &format!("{ptr}/id"),
+            ));
+        }
+        for (j, r) in claim.evidence.iter().enumerate() {
+            if let Reference::Detailed(d) = r {
+                if d.alias.is_some() {
+                    out.push(err(
+                        "reference",
+                        "`as` belongs in production inputs, not claim references".into(),
+                        &format!("{ptr}/evidence/{j}/as"),
+                    ));
+                }
+                if d.satisfies.as_deref().is_some_and(str::is_empty) {
+                    out.push(err(
+                        "reference",
+                        "`satisfies` must name a requirement id".into(),
+                        &format!("{ptr}/evidence/{j}/satisfies"),
+                    ));
+                }
             }
+        }
+    }
+    let mut seen_requirements = HashSet::new();
+    for (i, r) in file.requirements.iter().enumerate() {
+        if !seen_requirements.insert(r.id.as_str()) {
+            out.push(err(
+                "duplicate",
+                format!("requirement id `{}` is used twice", r.id),
+                &format!("/requirements/{i}"),
+            ));
         }
     }
     out
 }
 
-/// Rules for one command table.
-fn check_action(file: &EvidenceFile, table: &str, action: &Action, out: &mut Vec<Diagnostic>) {
-    let ptr = format!("/{table}");
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActionKind {
+    Production,
+    Verify,
+}
+
+/// Rules for one command.
+fn check_action(
+    production: &Production,
+    action: &Action,
+    ptr: &str,
+    kind: ActionKind,
+    out: &mut Vec<Diagnostic>,
+) {
     let err = |code, msg: String, field: &str| {
         Diagnostic::error(code, msg).at_pointer(format!("{ptr}{field}"))
     };
     if action.run.first().is_none_or(|p| p.trim().is_empty()) {
         out.push(err("run", "`run` needs a program".into(), "/run"));
     }
-    if table != "source" && action.interval.is_some() {
-        out.push(err(
-            "action-field",
-            format!("`interval` is only allowed in `[source]`, not `[{table}]`"),
-            "/interval",
-        ));
-    }
-    if table == "verify" {
+    if kind == ActionKind::Verify {
         if action.stdout {
             out.push(err(
                 "action-field",
@@ -436,16 +599,7 @@ fn check_action(file: &EvidenceFile, table: &str, action: &Action, out: &mut Vec
         }
     }
 
-    // Placeholders: syntax, and inputs that exist.
-    let names: Vec<&str> = match file.kind {
-        Kind::Authored => file
-            .inputs
-            .iter()
-            .map(InputRef::name)
-            .chain(file.dependencies())
-            .collect(),
-        _ => file.inputs.iter().map(InputRef::name).collect(),
-    };
+    let names: Vec<&str> = production.inputs.iter().map(Reference::name).collect();
     // (pointer, template, is a stored locator value)
     let mut templates: Vec<(String, &str, bool)> = Vec::new();
     for (i, arg) in action.run.iter().enumerate() {
@@ -490,7 +644,31 @@ fn check_action(file: &EvidenceFile, table: &str, action: &Action, out: &mut Vec
                 Placeholder::Input(n) | Placeholder::InputSnapshot(n) if !names.contains(&n) => {
                     out.push(err(
                         "placeholder",
-                        format!("`{{input.{n}}}` does not name an input of `{}`", file.id),
+                        format!(
+                            "`{{input.{n}}}` does not name an input of `{}`",
+                            production.name
+                        ),
+                        &field,
+                    ));
+                }
+                Placeholder::Simple("output")
+                    if kind == ActionKind::Production && !production.writes_subject() =>
+                {
+                    out.push(err(
+                        "placeholder",
+                        format!(
+                            "`{{output}}`: production `{}` does not write the subject",
+                            production.name
+                        ),
+                        &field,
+                    ));
+                }
+                Placeholder::Simple("claims")
+                    if kind == ActionKind::Verify || !production.writes_claims() =>
+                {
+                    out.push(err(
+                        "placeholder",
+                        "`{claims}` is only available to productions that write claims".into(),
                         &field,
                     ));
                 }
@@ -530,17 +708,25 @@ pub enum WriteError {
     Toml(PathBuf, String),
 }
 
-/// Replaces the `[state]` table of an evidence file, preserving the definition verbatim.
-///
-/// The write is atomic (temporary file + rename in the same directory).
-pub(crate) fn write_state(path: &Path, state: &State) -> Result<(), WriteError> {
-    let text = std::fs::read_to_string(path).map_err(|e| WriteError::Io(path.to_path_buf(), e))?;
-    let new_text =
-        replace_state(&text, state).map_err(|e| WriteError::Toml(path.to_path_buf(), e))?;
-    if new_text != text {
-        atomic_write(path, new_text.as_bytes())?;
+/// The `[state]` table of an evidence file or a member file, in the format version 2 shape
+/// (empty when there is none).
+pub(crate) fn state_in(text: &str) -> Result<State, String> {
+    let doc: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
+    match doc.get("state") {
+        None => Ok(State::default()),
+        Some(v) => v
+            .clone()
+            .try_into()
+            .map_err(|e: toml::de::Error| e.to_string()),
     }
-    Ok(())
+}
+
+/// The definition of an evidence file or a member file, without its `[state]` table, as a
+/// comparable value.
+pub(crate) fn definition_in(text: &str) -> Option<toml::Table> {
+    let mut doc: toml::Table = toml::from_str(text).ok()?;
+    doc.remove("state");
+    Some(doc)
 }
 
 /// Returns `text` with its `[state]` table replaced by `state` (removed if `state` is empty).
@@ -587,6 +773,9 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WriteError> 
     let mut tmp =
         tempfile::NamedTempFile::new_in(dir).map_err(|e| WriteError::Io(dir.to_path_buf(), e))?;
     tmp.write_all(bytes)
+        .map_err(|e| WriteError::Io(path.to_path_buf(), e))?;
+    tmp.as_file()
+        .sync_all()
         .map_err(|e| WriteError::Io(path.to_path_buf(), e))?;
     tmp.persist(path)
         .map_err(|e| WriteError::Io(path.to_path_buf(), e.error))?;

@@ -7,13 +7,14 @@ use jiff::Timestamp;
 use serde::Serialize;
 
 use crate::format::document::{self, evid_path};
-use crate::format::{Entry, List, MemberFile, OnRemoved, State, entries};
+use crate::format::{ContentMode, Entry, List, MemberFile, OnRemoved, State, entries};
 use crate::layout::{DIR, Layout};
 use crate::remove;
+use crate::snapshot::Resolver;
 use crate::workspace::{MemberOnDisk, Pair, Workspace, inside, normalize};
 
 /// What `evidence update` did to a member of a list.
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MemberChange {
     /// Id of the parent.
     pub parent: String,
@@ -29,7 +30,7 @@ pub struct MemberChange {
 }
 
 /// What happened to a member.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemberAction {
     /// A new entry: its evidence file was created.
@@ -44,15 +45,20 @@ pub enum MemberAction {
     Skipped,
 }
 
-/// The entries of a parent's list, or `None` when `pair` has no `[members]` or the list has
-/// not been produced. Problems with single entries come back with the entries.
-pub(crate) fn listing(pair: &Pair) -> Option<Result<List, String>> {
+/// The entries of a parent's list, read from the parent's current version (the adopted
+/// version when the list is produced: a modified working file does not add or remove
+/// members), or `None` when `pair` has no `[members]` or the list has not been produced.
+/// Problems with single entries come back with the entries.
+pub(crate) fn listing(ws: &Workspace, pair: &Pair) -> Option<Result<List, String>> {
     let members = pair.file.members.as_ref()?;
-    if !pair.subject_path.is_file() {
+    if pair.file.content_mode() == ContentMode::Editable && !pair.subject_path.is_file() {
         return None;
     }
+    let resolver = Resolver::new(ws);
+    let version = resolver.current(pair).ok()?;
     Some(
-        std::fs::read_to_string(&pair.subject_path)
+        resolver
+            .text(&version, None)
             .map_err(|e| e.to_string())
             .and_then(|text| entries(&text, pair.format(), members)),
     )
@@ -72,7 +78,7 @@ pub(crate) fn sync(
     let Some(members) = &parent.file.members else {
         return Vec::new();
     };
-    let Some(Ok(List { entries: list, .. })) = listing(parent) else {
+    let Some(Ok(List { entries: list, .. })) = listing(ws, parent) else {
         return Vec::new();
     };
     let on_disk: Vec<&MemberOnDisk> = ws
@@ -116,7 +122,13 @@ pub(crate) fn sync(
         }
         let pair = ws.pairs().iter().find(|p| p.evid_path == f.evid_path);
         let dependents: Vec<String> = pair
-            .map(|p| ws.dependents(&p.id).iter().map(|d| d.id.clone()).collect())
+            .map(|p| {
+                ws.current_dependents(&p.id)
+                    .iter()
+                    .filter(|d| d.membership.as_ref().is_none_or(|m| m.parent != p.id))
+                    .map(|d| d.id.clone())
+                    .collect()
+            })
             .unwrap_or_default();
         if !dependents.is_empty() {
             changes.push(change(
@@ -213,13 +225,20 @@ fn refresh(ws: &Workspace, evid: &Path, entry: &Entry) {
     let Some(pair) = ws.pairs().iter().find(|p| p.evid_path == evid) else {
         return;
     };
-    if pair.file.producer().is_some() {
+    if !pair.file.productions.is_empty() || pair.legacy {
         return;
     }
-    let mut state = pair.file.state();
+    let Ok(text) = std::fs::read_to_string(evid) else {
+        return;
+    };
+    let Ok(mut state) = document::state_in(&text) else {
+        return;
+    };
     if state.member.as_ref() != Some(&entry.state) {
         state.member = Some(entry.state.clone());
-        if let Err(e) = document::write_state(evid, &state) {
+        let written = document::replace_state(&text, &state)
+            .and_then(|t| document::atomic_write(evid, t.as_bytes()).map_err(|e| e.to_string()));
+        if let Err(e) = written {
             tracing::warn!(evid = %evid.display(), error = %e, "recording member entry");
         }
     }

@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use evidence_core::format::{Kind, Lifecycle};
+use evidence_core::Template;
 
 /// Track where every file comes from, whether it is still up to date, and which parts of
 /// hand-written documents are backed by evidence.
@@ -58,8 +58,16 @@ pub(crate) enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Refresh evidence: due and stale pairs, everything with --force, or only the given paths.
+    /// Run productions (due and stale ones, or the given targets), or pin claims (--pin).
     Update(UpdateArgs),
+    /// Rewrite format version 1 evidence files as format version 2.
+    Migrate {
+        /// Ids or paths (default: the whole project).
+        targets: Vec<String>,
+        /// Report what would change without writing anything.
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+    },
     /// List pairs that need attention (due, stale, modified, failed, missing, broken).
     Outdated {
         /// Ids or paths (default: the whole project).
@@ -73,15 +81,16 @@ pub(crate) enum Command {
         /// Ids or paths (default: the whole project).
         targets: Vec<String>,
     },
-    /// Confirm authored subjects against current evidence and pin their claims.
+    /// Deprecated: use `evidence update --pin <target>[#<claim>]`. Pins claims.
+    #[command(hide = true)]
     Review {
-        /// Ids or paths of authored subjects.
+        /// Ids or paths.
         #[arg(required = true)]
         targets: Vec<String>,
         /// Only these claims.
         #[arg(long = "claim", value_name = "ID")]
         claims: Vec<String>,
-        /// Reviewer recorded in the state (default: `user.name` from the config).
+        /// Who pins (default: `user.name` from the config).
         #[arg(long)]
         by: Option<String>,
     },
@@ -93,18 +102,28 @@ pub(crate) enum Command {
         #[arg(long)]
         strict: bool,
     },
-    /// Line-level coverage of an authored subject by its claims.
+    /// Line coverage of a pair's current version by its claims and primary ranges, or (with
+    /// --requirements) which of its requirements are satisfied.
     Coverage {
         /// Id or path.
         target: String,
-        /// Fail if the covered-or-primary share is below this percentage.
+        /// Fail if the matched-or-primary share (or, with --requirements, the matched share)
+        /// is below this percentage.
         #[arg(long, value_name = "PERCENT")]
         min: Option<f64>,
         /// Print every line with its status.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "requirements")]
         lines: bool,
+        /// Requirement coverage: which requirements of the target claims `satisfies`.
+        #[arg(long)]
+        requirements: bool,
+        /// With --requirements: examine this revision (`sha256:…`) instead of the current
+        /// version.
+        #[arg(long, requires = "requirements", value_name = "SNAPSHOT")]
+        revision: Option<String>,
     },
-    /// Show the dependency tree (or, with --invert, everything affected by a change).
+    /// Show the dependency tree: production inputs, claim references, and members, each
+    /// labelled (or, with --invert, everything affected by a change).
     Tree {
         /// Id or path (default: all roots).
         target: Option<String>,
@@ -128,7 +147,7 @@ pub(crate) enum Command {
         /// Id or path.
         target: String,
     },
-    /// Past runs and reviews of a pair.
+    /// Past runs, pins, and migrations of a pair.
     History {
         /// Id or path.
         target: String,
@@ -183,9 +202,11 @@ pub(crate) struct AddArgs {
     /// be inside the project; the subject may live elsewhere.
     #[arg(long, value_name = "PATH")]
     pub(crate) evid: Option<PathBuf>,
-    /// Evidence kind.
-    #[arg(long, value_parser = parse_kind)]
-    pub(crate) kind: Kind,
+    /// Template: `source` (a production that fetches), `derived` (a production with
+    /// inputs), or `authored` (an editable subject). Only decides what is written; no kind is
+    /// recorded.
+    #[arg(long, value_parser = parse_template, default_value = "authored")]
+    pub(crate) kind: Template,
     /// Id (default: derived from the file name).
     #[arg(long)]
     pub(crate) id: Option<String>,
@@ -195,19 +216,16 @@ pub(crate) struct AddArgs {
     /// Capture the command's standard output as the subject (`stdout = true`).
     #[arg(long)]
     pub(crate) stdout: bool,
-    /// Input evidence id (derived). Repeatable.
+    /// Input evidence id of the production. Repeatable.
     #[arg(long = "input", value_name = "ID")]
     pub(crate) inputs: Vec<String>,
-    /// Refresh interval for sources, e.g. `6h`.
+    /// Refresh interval of the production, e.g. `6h`.
     #[arg(long)]
     pub(crate) interval: Option<String>,
-    /// Lifecycle (authored/derived).
-    #[arg(long, value_parser = parse_lifecycle)]
-    pub(crate) lifecycle: Option<Lifecycle>,
     /// Tag. Repeatable.
     #[arg(long = "tag")]
     pub(crate) tags: Vec<String>,
-    /// The command (after `--`): `[source]`, `[transform]`, or an authored `[generator]`.
+    /// The command of the production (after `--`).
     /// Placeholders such as `{output}` and `{input.NAME}` are expanded when it runs.
     #[arg(last = true, value_name = "COMMAND")]
     pub(crate) run: Vec<String>,
@@ -215,15 +233,24 @@ pub(crate) struct AddArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct UpdateArgs {
-    /// Ids or paths. Without them, everything due or stale is updated.
+    /// Ids or paths. Without them, every production with a reason to run runs. With --pin:
+    /// `<path or id>` or `<path or id>#<claim>` (required).
     pub(crate) targets: Vec<String>,
-    /// Run every selected pair regardless of interval and freshness.
+    /// Pin claims of the targets to the versions resolved now. Runs nothing, fetches
+    /// nothing, and does not touch other pairs. If any target claim cannot be pinned, nothing
+    /// is recorded (exit 1). With --force, --isolated, or --jobs it is a usage error (exit 2).
+    #[arg(long, conflicts_with_all = ["force", "isolated", "jobs"])]
+    pub(crate) pin: bool,
+    /// With --pin: who pins (default: `user.name` from the config).
+    #[arg(long, requires = "pin")]
+    pub(crate) by: Option<String>,
+    /// Run every selected production regardless of interval and freshness.
     #[arg(long)]
     pub(crate) force: bool,
-    /// Only update the selection; mark dependents stale instead of re-running them.
+    /// Only run the selection; report dependents instead of re-running them.
     #[arg(long)]
     pub(crate) isolated: bool,
-    /// Show what would run, and why, without running anything.
+    /// Show what would run (or be pinned), and why, without changing anything.
     #[arg(long, short = 'n')]
     pub(crate) dry_run: bool,
     /// Parallel jobs.
@@ -301,9 +328,10 @@ pub(crate) enum TreeFormat {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum HealthArg {
-    /// Interval elapsed.
+    /// A production's interval elapsed.
     Due,
-    /// Inputs/evidence changed.
+    /// A production input changed, or a claim does not match its pin (a difference from a
+    /// fixed revision is a notice, never stale).
     Stale,
     /// Changed outside the tool.
     Modified,
@@ -330,16 +358,7 @@ impl HealthArg {
     }
 }
 
-fn parse_kind(s: &str) -> Result<Kind, String> {
-    s.parse()
-}
-
-fn parse_lifecycle(s: &str) -> Result<Lifecycle, String> {
-    match s {
-        "snapshot" => Ok(Lifecycle::Snapshot),
-        "living" => Ok(Lifecycle::Living),
-        other => Err(format!(
-            "unknown lifecycle `{other}` (expected snapshot or living)"
-        )),
-    }
+fn parse_template(s: &str) -> Result<Template, String> {
+    Template::parse(s)
+        .ok_or_else(|| format!("unknown template `{s}` (expected source, derived, or authored)"))
 }

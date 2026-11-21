@@ -1,4 +1,8 @@
-//! Append-only run and review history (`.evidence/history/<id>.jsonl`).
+//! Append-only history of runs, pins, migrations, and removals
+//! (`.evidence/history/<id>.jsonl`).
+//!
+//! Events are never rewritten. Events written before format version 2 (`review`, `fetch`,
+//! `transform`, `generate`) are kept as they were.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -9,14 +13,22 @@ use crate::error::{Error, Result};
 use crate::layout::Layout;
 
 /// One history record.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     /// When it happened (RFC 3339).
     pub at: String,
-    /// `fetch`, `transform`, `generate`, `review`, `remove`.
+    /// `run`, `pin`, `migrate`, `remove` (and, before format version 2: `fetch`,
+    /// `transform`, `generate`, `review`).
     pub operation: String,
-    /// `changed`, `unchanged`, `failed`, `reviewed`, `removed`.
+    /// `changed`, `unchanged`, `failed`, `pinned`, `migrated`, `removed` (`reviewed` before
+    /// format version 2).
     pub status: String,
+    /// The production that ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production: Option<String>,
+    /// Run id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
     /// Snapshot after the event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<String>,
@@ -29,9 +41,12 @@ pub struct Event {
     /// Locator recorded by the run.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub locator: BTreeMap<String, String>,
-    /// Claims reviewed.
+    /// Claims pinned (or, for runs, the claims returned).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claims: Vec<String>,
+    /// Pins recorded by the event, with the versions they bind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pins: Vec<PinEvent>,
     /// Who performed it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
@@ -41,6 +56,62 @@ pub struct Event {
     /// Duration in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+}
+
+/// A pin recorded by an event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PinEvent {
+    /// Claim id.
+    pub claim: String,
+    /// Fingerprint of the claim definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
+    /// Subject snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    /// Hash of the claimed range.
+    pub fragment: String,
+    /// Reference key -> snapshot.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub evidence: BTreeMap<String, String>,
+}
+
+impl PinEvent {
+    pub(crate) fn of(claim: &str, pin: &crate::format::PinRecord) -> Self {
+        Self {
+            claim: claim.to_owned(),
+            definition: pin.definition.map(|d| d.to_string()),
+            subject: pin.content.snapshot.map(|s| s.to_string()),
+            fragment: pin.content.fragment.to_string(),
+            evidence: pin
+                .evidence
+                .iter()
+                .map(|e| (e.key.clone(), e.snapshot.to_string()))
+                .collect(),
+        }
+    }
+}
+
+impl Event {
+    /// An event with only the required fields set.
+    pub(crate) fn new(at: jiff::Timestamp, operation: &str, status: &str) -> Self {
+        Self {
+            at: at.to_string(),
+            operation: operation.into(),
+            status: status.into(),
+            production: None,
+            run: None,
+            snapshot: None,
+            previous: None,
+            inputs: BTreeMap::new(),
+            locator: BTreeMap::new(),
+            claims: Vec::new(),
+            pins: Vec::new(),
+            by: None,
+            message: None,
+            duration_ms: None,
+        }
+    }
 }
 
 /// Appends an event to a pair's history.
@@ -92,6 +163,10 @@ pub(crate) fn referenced_snapshots(layout: &Layout) -> Result<Vec<String>> {
             out.extend(event.snapshot);
             out.extend(event.previous);
             out.extend(event.inputs.into_values());
+            for pin in event.pins {
+                out.extend(pin.subject);
+                out.extend(pin.evidence.into_values());
+            }
         }
     }
     Ok(out)

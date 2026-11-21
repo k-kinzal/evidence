@@ -8,12 +8,12 @@ use crate::workspace::Workspace;
 const MAX_SCAN: u64 = 4 * 1024 * 1024;
 
 /// One search hit.
-#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Hit {
     /// Evidence id.
     pub id: String,
-    /// Kind.
-    pub kind: String,
+    /// Content mode (`editable` or `produced`).
+    pub content: String,
     /// Title.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -108,7 +108,7 @@ pub(crate) fn search(ws: &Workspace, query: &str, limit: usize) -> Vec<Hit> {
         let (field, line, snippet) = best.unwrap_or_else(|| ("id".into(), None, pair.id.clone()));
         hits.push(Hit {
             id: pair.id.clone(),
-            kind: f.kind.to_string(),
+            content: f.content_mode().as_str().to_owned(),
             title: f.title.clone(),
             subject: pair.subject_rel.clone(),
             field,

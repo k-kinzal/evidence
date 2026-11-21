@@ -13,13 +13,15 @@ use crate::format::template::{self, Placeholder};
 use crate::format::{Action, LocatorValue};
 use serde::Serialize;
 
-/// An input made available to a command.
+/// An input made available to a command: a materialized copy of the version used.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RunInput {
     pub(crate) id: String,
     pub name: String,
     pub path: PathBuf,
     pub snapshot: String,
+    /// The reference names a fixed revision.
+    pub fixed: bool,
 }
 
 /// Everything placeholders can refer to.
@@ -28,8 +30,12 @@ pub(crate) struct RunContext {
     pub(crate) id: String,
     pub root: PathBuf,
     pub dir: PathBuf,
+    /// A materialized copy of the current version of the subject (may not exist).
     pub subject: PathBuf,
+    /// Where a subject-writing production writes the new subject.
     pub output: PathBuf,
+    /// Where a claims-writing production writes its claims.
+    pub claims: PathBuf,
     pub cache: PathBuf,
     pub context_file: PathBuf,
     pub inputs: Vec<RunInput>,
@@ -48,6 +54,7 @@ impl RunContext {
         match p {
             Placeholder::Simple(name) => Ok(match name {
                 "output" => path(&self.output),
+                "claims" => path(&self.claims),
                 "subject" => path(&self.subject),
                 "root" => path(&self.root),
                 "dir" => path(&self.dir),
@@ -83,6 +90,7 @@ impl RunContext {
             ("EVIDENCE_ROOT", self.root.clone().into_os_string()),
             ("EVIDENCE_SUBJECT", self.subject.clone().into_os_string()),
             ("EVIDENCE_OUTPUT", self.output.clone().into_os_string()),
+            ("EVIDENCE_CLAIMS", self.claims.clone().into_os_string()),
             ("EVIDENCE_CACHE", self.cache.clone().into_os_string()),
             (
                 "EVIDENCE_CONTEXT",
@@ -133,20 +141,22 @@ fn command(
     Ok(process)
 }
 
-/// Runs the main command of `action`. With `capture`, `stdout = true` sends the program's
-/// output to `{output}`.
+/// Runs the main command of `action`. With `stdout_to`, `stdout = true` sends the program's
+/// output to that file (`{output}` or `{claims}`).
 pub(crate) fn run_action(
     ctx: &RunContext,
     action: &Action,
-    capture: bool,
+    stdout_to: Option<&Path>,
     timeout: Option<Duration>,
 ) -> Result<(), String> {
     let mut process = command(ctx, action, &action.run, timeout)?;
     if let Some(stdin) = &action.stdin {
         process.stdin_from = Some(ctx.dir.join(ctx.expand(stdin)?));
     }
-    if capture && action.stdout {
-        process.stdout_to = Some(ctx.output.clone());
+    if action.stdout
+        && let Some(to) = stdout_to
+    {
+        process.stdout_to = Some(to.to_path_buf());
     }
     let out = process.run()?;
     if out.success() {
@@ -348,6 +358,7 @@ mod tests {
             dir: dir.into(),
             subject: dir.join("x.txt"),
             output: dir.join("out.txt"),
+            claims: dir.join("claims.json"),
             cache: dir.join("cache"),
             context_file: dir.join("context.json"),
             inputs: vec![RunInput {
@@ -355,6 +366,7 @@ mod tests {
                 name: "r".into(),
                 path: dir.join("raw.json"),
                 snapshot: "sha256:00".into(),
+                fixed: false,
             }],
         }
     }
@@ -367,7 +379,6 @@ mod tests {
             env: BTreeMap::new(),
             cwd: None,
             timeout: None,
-            interval: None,
             locator: BTreeMap::new(),
         }
     }
@@ -378,12 +389,12 @@ mod tests {
         let ctx = ctx(dir.path());
         let mut a = action(&["printf", "%s|%s", "{id}", "{input.r.snapshot}"]);
         a.stdout = true;
-        run_action(&ctx, &a, true, None).unwrap();
+        run_action(&ctx, &a, Some(&ctx.output), None).unwrap();
         assert_eq!(std::fs::read_to_string(&ctx.output).unwrap(), "x|sha256:00");
 
-        let err = run_action(&ctx, &action(&["ls", "/no/such/path"]), true, None).unwrap_err();
+        let err = run_action(&ctx, &action(&["ls", "/no/such/path"]), None, None).unwrap_err();
         assert!(err.contains("`ls` exited with code"), "{err}");
-        let err = run_action(&ctx, &action(&["no-such-program-xyz"]), true, None).unwrap_err();
+        let err = run_action(&ctx, &action(&["no-such-program-xyz"]), None, None).unwrap_err();
         assert!(err.contains("cannot run `no-such-program-xyz`"), "{err}");
     }
 
@@ -395,7 +406,7 @@ mod tests {
         let mut a = action(&["cat"]);
         a.stdout = true;
         a.stdin = Some("query.sql".into());
-        run_action(&ctx, &a, true, None).unwrap();
+        run_action(&ctx, &a, Some(&ctx.output), None).unwrap();
         assert_eq!(std::fs::read_to_string(&ctx.output).unwrap(), "select 1");
     }
 
@@ -405,7 +416,7 @@ mod tests {
         let err = run_action(
             &ctx(dir.path()),
             &action(&["sleep", "5"]),
-            true,
+            None,
             Some(Duration::from_millis(100)),
         )
         .unwrap_err();

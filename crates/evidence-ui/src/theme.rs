@@ -86,8 +86,7 @@ pub(crate) fn health(h: Health) -> Hsla {
 
 pub(crate) fn claim(h: ClaimHealth) -> Hsla {
     match h {
-        ClaimHealth::Covered => green(),
-        ClaimHealth::Primary => blue(),
+        ClaimHealth::Matched => green(),
         ClaimHealth::Stale => amber(),
         ClaimHealth::Broken => red(),
     }
@@ -95,7 +94,7 @@ pub(crate) fn claim(h: ClaimHealth) -> Hsla {
 
 pub(crate) fn line(s: LineStatus) -> Hsla {
     match s {
-        LineStatus::Covered => green(),
+        LineStatus::Matched => green(),
         LineStatus::Primary => blue(),
         LineStatus::Stale => amber(),
         LineStatus::Broken => red(),

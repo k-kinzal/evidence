@@ -2,13 +2,13 @@
 source: crates/evidence-cli/tests/cli.rs
 expression: "p.stdout(&[\"coverage\", \"report\", \"--lines\"])"
 ---
-report.md  75.0% backed (75.0% by evidence, rest primary)
-  covered 3  primary 0  stale 0  broken 0  uncovered 1  (non-blank lines)
+report.md sha256:000c2a7080c4  75.0% backed (75.0% by matched claims, rest primary)
+  matched 3  primary 0  stale 0  broken 0  uncovered 1  (non-blank lines)
 uncovered     1 | # Report
 uncovered     2 | 
-covered       3 | ## Findings
-covered       4 | 
-covered       5 | CVE-1 is high.
-covered       6 | 
-covered       7 | Unbacked.
-  claim covered  findings                 lines 3-7
+matched       3 | ## Findings
+matched       4 | 
+matched       5 | CVE-1 is high.
+matched       6 | 
+matched       7 | Unbacked.
+  claim matched  findings                 lines 3-7

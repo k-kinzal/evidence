@@ -1,0 +1,14 @@
+version = 2
+id = "api-reference"
+
+[[productions]]
+name = "render"
+writes = ["subject", "claims"]
+namespace = "api"
+run = ["render-api", "--spec", "{input.spec}", "--out", "{output}", "--claims", "{claims}"]
+inputs = [{ ref = "openapi", as = "spec" }]
+
+[[claims]]
+id = "intro"
+select = { heading = "## Introduction" }
+evidence = ["openapi"]

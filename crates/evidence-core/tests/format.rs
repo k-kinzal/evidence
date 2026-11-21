@@ -1,7 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use std::path::Path;
 
-use evidence_core::format::{Kind, ObjectId, Selector, State};
+use evidence_core::format::{
+    ContentMode, ContentRecord, ObjectId, Output, RefVersion, Selector, State,
+};
 use evidence_core::format::{evid_path, parse, render, replace_state, subject_path};
 
 fn fixture(name: &str) -> String {
@@ -9,11 +11,12 @@ fn fixture(name: &str) -> String {
 }
 
 #[test]
-fn parses_all_kinds() {
-    for (name, kind) in [
-        ("source.json.evid", Kind::Source),
-        ("derived.json.evid", Kind::Derived),
-        ("authored.md.evid", Kind::Authored),
+fn parses_every_shape() {
+    for (name, mode) in [
+        ("source.json.evid", ContentMode::Produced),
+        ("derived.json.evid", ContentMode::Produced),
+        ("authored.md.evid", ContentMode::Editable),
+        ("generated.md.evid", ContentMode::Produced),
     ] {
         let parsed = parse(&fixture(name), Path::new(name));
         assert!(
@@ -21,62 +24,122 @@ fn parses_all_kinds() {
             "{name}: {:?}",
             parsed.diagnostics
         );
-        assert_eq!(parsed.file.unwrap().kind, kind);
+        assert!(parsed.legacy.is_none());
+        assert_eq!(parsed.file.unwrap().content_mode(), mode, "{name}");
     }
 }
 
 #[test]
-fn authored_claims_and_dependencies() {
+fn claims_references_and_inputs() {
     let file = parse(&fixture("authored.md.evid"), Path::new("a"))
         .file
         .unwrap();
-    assert_eq!(file.dependencies(), vec!["service-map", "vulns-filtered"]);
+    assert_eq!(
+        file.claim_ref_ids(false),
+        vec!["service-map", "vulns-filtered"]
+    );
+    assert_eq!(
+        file.claim_ref_ids(true),
+        vec!["service-map", "vulns-filtered"]
+    );
     let claim = &file.claims[1];
     assert_eq!(claim.select, Selector::Lines("40-58".parse().unwrap()));
-    assert_eq!(
-        claim.evidence[0].key(),
-        "vulns-filtered#json_pointer=/findings/12"
+    assert!(matches!(
+        claim.evidence[0].version(),
+        RefVersion::Revision(Some(_))
+    ));
+    assert!(
+        claim.evidence[0]
+            .key()
+            .starts_with("vulns-filtered#json_pointer=/findings/12@sha256:1111")
+    );
+    assert_eq!(file.primary.len(), 1);
+
+    let derived = parse(&fixture("derived.json.evid"), Path::new("d"))
+        .file
+        .unwrap();
+    assert_eq!(derived.input_ids(), vec!["vulns-raw", "sbom-app"]);
+    assert_eq!(derived.productions[0].inputs[1].name(), "sbom");
+
+    let generated = parse(&fixture("generated.md.evid"), Path::new("g"))
+        .file
+        .unwrap();
+    let render = generated.production("render").unwrap();
+    assert_eq!(render.writes, vec![Output::Subject, Output::Claims]);
+    assert!(render.owns("api.get-users") && !render.owns("intro"));
+}
+
+#[test]
+fn version_1_files_are_read_and_converted() {
+    for name in ["source.json.evid", "derived.json.evid", "authored.md.evid"] {
+        let parsed = parse(&fixture(&format!("v1/{name}")), Path::new(name));
+        assert!(parsed.legacy.is_some(), "{name}");
+        assert!(
+            parsed.diagnostics.iter().any(|d| d.code == "legacy-format"),
+            "{name}: {:?}",
+            parsed.diagnostics
+        );
+        assert_eq!(parsed.file.unwrap().version, 2);
+    }
+    // `lifecycle = "snapshot"` without pins: the revision is unknown and blocks migration.
+    let parsed = parse(&fixture("v1/authored.md.evid"), Path::new("a"));
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "revision-unknown")
     );
 }
 
 #[test]
 fn schema_errors_have_lines_and_pointers() {
-    let text =
-        "version = 1\nkind = \"source\"\nid = \"x\"\n\n[source]\nrun = [\"curl\"]\ninterval = 5\n";
+    let text = "version = 2\nid = \"x\"\n\n[[productions]]\nname = \"p\"\nwrites = [\"subject\"]\nrun = [\"curl\"]\ninterval = 5\n";
     let parsed = parse(text, Path::new("bad.evid"));
     assert!(parsed.has_errors());
     let d = &parsed.diagnostics[0];
     assert_eq!(d.code, "schema");
-    assert_eq!(d.pointer.as_deref(), Some("/source/interval"));
-    assert_eq!(d.line, Some(7));
+    assert_eq!(d.pointer.as_deref(), Some("/productions/0/interval"));
+    assert_eq!(d.line, Some(8));
 }
 
 #[test]
-fn unknown_fields_and_kind_rules() {
-    let parsed = parse(
-        "version = 1\nkind = \"derived\"\nid = \"x\"\ncolour = 1\n",
-        Path::new("x"),
-    );
+fn unknown_fields_and_production_rules() {
+    let parsed = parse("version = 2\nid = \"x\"\ncolour = 1\n", Path::new("x"));
     assert!(parsed.diagnostics.iter().any(|d| d.code == "schema"));
-
     let parsed = parse(
-        "version = 1\nkind = \"derived\"\nid = \"x\"\n[source]\nrun = [\"git\"]\n",
+        "version = 2\nid = \"x\"\nkind = \"source\"\n",
         Path::new("x"),
     );
-    let codes: Vec<_> = parsed.diagnostics.iter().map(|d| d.code).collect();
-    assert!(codes.contains(&"kind-field"), "{codes:?}");
+    assert!(
+        parsed.diagnostics.iter().any(|d| d.code == "schema"),
+        "no kind in version 2"
+    );
+
+    let two_writers = "version = 2\nid = \"x\"\n[[productions]]\nname = \"a\"\nwrites = [\"subject\"]\nrun = [\"true\"]\n[[productions]]\nname = \"b\"\nwrites = [\"subject\"]\nrun = [\"true\"]\n";
+    let codes: Vec<_> = parse(two_writers, Path::new("x"))
+        .diagnostics
+        .iter()
+        .map(|d| d.code)
+        .collect();
+    assert!(codes.contains(&"subject-writers"), "{codes:?}");
+
+    let no_namespace = "version = 2\nid = \"x\"\n[[productions]]\nname = \"a\"\nwrites = [\"claims\"]\nrun = [\"true\"]\n";
+    assert!(parse(no_namespace, Path::new("x")).has_errors());
 }
 
 #[test]
 fn claim_rules() {
-    let text = "version = 1\nkind = \"authored\"\nid = \"r\"\n\n[[claims]]\nid = \"a\"\nselect = { lines = \"1-2\" }\n\n[[claims]]\nid = \"a\"\nselect = { lines = 3 }\norigin = \"primary\"\nevidence = [\"x\"]\n";
+    let text = "version = 2\nid = \"r\"\n\n[[claims]]\nid = \"a\"\nselect = { lines = \"1-2\" }\nevidence = []\n\n[[claims]]\nid = \"a\"\nselect = { lines = \"3\" }\nevidence = [\"x\"]\n";
     let parsed = parse(text, Path::new("r.md.evid"));
     let msgs: Vec<_> = parsed
         .diagnostics
         .iter()
         .map(|d| (d.code, d.line))
         .collect();
-    assert!(msgs.contains(&("claim", Some(5))), "{msgs:?}");
+    assert!(
+        msgs.iter().any(|(c, l)| *c == "claim" && *l == Some(4)),
+        "{msgs:?}"
+    );
     assert!(msgs.contains(&("duplicate", Some(9))), "{msgs:?}");
 }
 
@@ -84,10 +147,14 @@ fn claim_rules() {
 fn state_write_preserves_definition() {
     let original = fixture("source.json.evid");
     let mut state = State {
-        snapshot: Some(ObjectId::of(b"data")),
+        content: Some(ContentRecord {
+            snapshot: ObjectId::of(b"data"),
+            updated_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            production: Some("fetch".into()),
+            run: None,
+        }),
         ..State::default()
     };
-    state.inputs.insert("a".into(), ObjectId::of(b"a"));
     let once = replace_state(&original, &state).unwrap();
     assert!(
         once.starts_with(original.trim_end()),
@@ -99,13 +166,15 @@ fn state_write_preserves_definition() {
     // Rewriting is idempotent and replaces rather than appends.
     let twice = replace_state(&once, &state).unwrap();
     assert_eq!(once, twice);
-    state.snapshot = Some(ObjectId::of(b"other"));
+    if let Some(c) = state.content.as_mut() {
+        c.snapshot = ObjectId::of(b"other");
+    }
     let third = replace_state(&twice, &state).unwrap();
-    assert_eq!(third.matches("[state]").count(), 1);
+    assert_eq!(third.matches("[state.content]").count(), 1);
 
     let parsed = parse(&third, Path::new("x"));
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-    assert_eq!(parsed.file.unwrap().state.unwrap().snapshot, state.snapshot);
+    assert_eq!(parsed.file.unwrap().state.unwrap().content, state.content);
 
     // Clearing state removes the table and the marker comment.
     let cleared = replace_state(&third, &State::default()).unwrap();
@@ -128,17 +197,22 @@ fn subject_paths() {
 
 #[test]
 fn render_round_trips() {
-    let file = parse(&fixture("derived.json.evid"), Path::new("x"))
-        .file
-        .unwrap();
-    let rendered = render(&file).unwrap();
-    let again = parse(&rendered, Path::new("x"));
-    assert!(
-        again.diagnostics.is_empty(),
-        "{rendered}\n{:?}",
-        again.diagnostics
-    );
-    assert_eq!(again.file.unwrap(), file);
+    for name in [
+        "derived.json.evid",
+        "authored.md.evid",
+        "generated.md.evid",
+        "source.json.evid",
+    ] {
+        let file = parse(&fixture(name), Path::new("x")).file.unwrap();
+        let rendered = render(&file).unwrap();
+        let again = parse(&rendered, Path::new("x"));
+        assert!(
+            again.diagnostics.is_empty(),
+            "{rendered}\n{:?}",
+            again.diagnostics
+        );
+        assert_eq!(again.file.unwrap(), file, "{name}");
+    }
 }
 
 #[test]
@@ -157,19 +231,23 @@ fn diagnostics_snapshot() {
     let cases = [
         (
             "schema.json.evid",
-            "version = 1\nkind = \"source\"\nid = \"raw\"\n\n[source]\nrun = [\"curl\", \"-o\", \"{output}\", \"https://example.com\"]\ninterval = \"soon\"\n",
+            "version = 2\nid = \"raw\"\n\n[[productions]]\nname = \"fetch\"\nwrites = [\"subject\"]\nrun = [\"curl\", \"-o\", \"{output}\", \"https://example.com\"]\ninterval = \"soon\"\n",
         ),
         (
             "semantic.md.evid",
-            "version = 1\nkind = \"authored\"\nid = \"Bad Id\"\n\n[[claims]]\nid = \"c\"\nselect = { lines = \"1-2\" }\n\n[[claims]]\nid = \"c\"\nselect = { lines = \"3\" }\nevidence = [\"x\"]\norigin = \"primary\"\n",
+            "version = 2\nid = \"Bad Id\"\n\n[[claims]]\nid = \"c\"\nselect = { lines = \"1-2\" }\nevidence = [\"x\"]\n\n[[claims]]\nid = \"c\"\nselect = { lines = \"3\" }\nevidence = [{ ref = \"x\", as = \"y\" }]\n",
         ),
-        ("syntax.json.evid", "version = 1\nkind = \n"),
+        ("syntax.json.evid", "version = 2\nid = \n"),
         (
             "command.json.evid",
-            "version = 1\nkind = \"derived\"\nid = \"c\"\ninputs = [\"raw\"]\n[transform]\nrun = [\"jq\", \".\", \"{input.raw}\", \"{input.sbom}\", \"{outptu}\"]\ninterval = \"1h\"\nlocator = { token = \"{env.TOKEN}\", commit = [] }\n[verify]\nrun = [\"test\", \"-s\", \"{output}\"]\nstdout = true\n",
+            "version = 2\nid = \"c\"\n[[productions]]\nname = \"t\"\nwrites = [\"subject\"]\ninputs = [\"raw\"]\nrun = [\"jq\", \".\", \"{input.raw}\", \"{input.sbom}\", \"{outptu}\", \"{claims}\"]\nlocator = { token = \"{env.TOKEN}\", commit = [] }\n[verify]\nrun = [\"test\", \"-s\", \"{output}\"]\nstdout = true\n",
         ),
         (
-            "kind.json.evid",
+            "namespaces.json.evid",
+            "version = 2\nid = \"n\"\n[[productions]]\nname = \"a\"\nwrites = [\"claims\"]\nnamespace = \"gen\"\nrun = [\"true\"]\n[[productions]]\nname = \"b\"\nwrites = [\"claims\"]\nnamespace = \"gen.sub\"\nrun = [\"true\"]\n[[claims]]\nid = \"gen.mine\"\nselect = { lines = \"1\" }\nevidence = [\"x\"]\n",
+        ),
+        (
+            "legacy.json.evid",
             "version = 1\nkind = \"derived\"\nid = \"d\"\n[source]\nrun = [\"cp\", \"x\", \"{output}\"]\n",
         ),
     ];
@@ -190,18 +268,16 @@ fn published_schema_covers_member_files() {
     let schema = evidence_core::format::evid_schema();
     let validator = jsonschema::validator_for(&schema).unwrap();
     let json = |text: &str| toml::from_str::<serde_json::Value>(text).unwrap();
-    let member = json("version = 1\nmember_of = \"space\"\nmember = \"7\"\ntitle = \"x\"\n");
+    let member = json("version = 2\nmember_of = \"space\"\nmember = \"7\"\ntitle = \"x\"\n");
     assert!(validator.is_valid(&member));
-    let with_kind = json("version = 1\nmember_of = \"space\"\nmember = \"7\"\nkind = \"source\"\n");
-    assert!(!validator.is_valid(&with_kind));
     let full = json(
-        "version = 1\nkind = \"source\"\nid = \"space\"\n[source]\nrun = [\"cp\"]\n[members]\nkey = \"/id\"\nid = \"p-{member.id}\"\nsubject = \"{member.id}.md\"\n",
+        "version = 2\nid = \"space\"\n[[productions]]\nname = \"fetch\"\nwrites = [\"subject\"]\nrun = [\"cp\"]\n[members]\nkey = \"/id\"\nid = \"p-{member.id}\"\nsubject = \"{member.id}.md\"\n",
     );
     assert!(validator.is_valid(&full));
-    assert!(!validator.is_valid(&json("version = 1\nkind = \"source\"\n")));
+    assert!(!validator.is_valid(&json("version = 2\n")));
 
     let parsed = evidence_core::format::parse(
-        "version = 1\nmember_of = \"space\"\nmember = \"7\"\nid = \"nope\"\n",
+        "version = 2\nmember_of = \"space\"\nmember = \"7\"\nid = \"nope\"\n",
         std::path::Path::new("m.evid"),
     );
     assert!(parsed.member.is_none());

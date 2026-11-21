@@ -10,15 +10,16 @@ use jiff::Timestamp;
 use serde::Serialize;
 
 use crate::add::{self, AddOptions};
-use crate::coverage::{self, CoverageReport};
+use crate::coverage::{self, CoverageReport, RequirementCoverage};
 use crate::error::{Error, Result};
 use crate::format::{Diagnostic, ObjectId};
 use crate::graph::{self, TreeNode};
 use crate::history::{self, Event};
 use crate::layout::{Layout, LoadedConfig};
+use crate::migrate::{self, MigrateOptions, MigrateReport};
 use crate::output::PairView;
+use crate::pin::{self, PinOptions, PinReport};
 use crate::remove::{self, Removed};
-use crate::review::{self, Pinned, ReviewOptions};
 use crate::search::{self, Hit};
 use crate::status::{self, PairStatus};
 use crate::store;
@@ -169,9 +170,31 @@ impl Project {
         PairView::new(&self.ws, pair, self.now())
     }
 
-    /// Line coverage of an authored subject.
+    /// Line coverage of a pair's current version by its claims and primary ranges.
     pub fn coverage(&self, pair: &Pair) -> Result<CoverageReport> {
         coverage::coverage(&self.ws, pair)
+    }
+
+    /// Which requirements of a pair are satisfied, by explicit `satisfies` references: in
+    /// its current version, or in `revision` (`sha256:…`).
+    pub fn requirement_coverage(
+        &self,
+        pair: &Pair,
+        revision: Option<&str>,
+    ) -> Result<RequirementCoverage> {
+        let revision = revision
+            .map(|r| {
+                r.parse::<ObjectId>()
+                    .map_err(|e| Error::Invalid(format!("`{r}`: {e}")))
+            })
+            .transpose()?;
+        coverage::requirements(&self.ws, pair, revision)
+    }
+
+    /// Committed adoptions that were interrupted and wait to be rolled forward (the next
+    /// command that changes the project does it).
+    pub fn pending_adoptions(&self) -> usize {
+        crate::journal::pending(&self.layout)
     }
 
     /// Checks evidence files, programs, subject schemas, and claims of the targets (all pairs
@@ -227,7 +250,7 @@ impl Project {
 
     // ---- History and search ----
 
-    /// Past runs and reviews of a pair, oldest first. A removed pair's history can still be
+    /// Past runs, pins, and migrations of a pair, oldest first. A removed pair's history can still be
     /// read by its id.
     pub fn history(&self, target: &str) -> Result<Vec<Event>> {
         let id = match self.find(target) {
@@ -269,11 +292,23 @@ impl Project {
         Ok(report)
     }
 
-    /// Confirms authored pairs: pins their claims to the current evidence.
-    pub fn review(&mut self, opts: &ReviewOptions) -> Result<Vec<Pinned>> {
-        let pinned = review::review(&self.layout, &self.cwd, self.now(), opts)?;
-        self.changed()?;
-        Ok(pinned)
+    /// Pins the selected claims to the versions resolved now (`evidence update --pin`). Runs
+    /// nothing; all selected claims are recorded together or none is.
+    pub fn pin(&mut self, opts: &PinOptions) -> Result<PinReport> {
+        let report = pin::pin(&self.layout, &self.cwd, self.now(), opts)?;
+        if report.recorded {
+            self.changed()?;
+        }
+        Ok(report)
+    }
+
+    /// Rewrites format version 1 evidence files as version 2.
+    pub fn migrate(&mut self, opts: &MigrateOptions) -> Result<MigrateReport> {
+        let report = migrate::migrate(&self.layout, &self.cwd, self.now(), opts)?;
+        if !opts.dry_run {
+            self.changed()?;
+        }
+        Ok(report)
     }
 
     /// Creates an evidence file and returns its path.
@@ -283,7 +318,7 @@ impl Project {
         Ok(path)
     }
 
-    /// Removes a pair. Refuses when others depend on it, unless `force`.
+    /// Removes a pair. Refuses when others use its current version, unless `force`.
     pub fn remove(&mut self, target: &str, keep_subject: bool, force: bool) -> Result<Removed> {
         let removed = remove::remove(&self.layout, &self.cwd, target, keep_subject, force)?;
         self.changed()?;
@@ -461,7 +496,7 @@ pub enum Object {
 }
 
 /// One entry of a directory snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DirEntry {
     /// File or directory name.
     pub name: String,
@@ -472,7 +507,7 @@ pub struct DirEntry {
 }
 
 /// Result of [`Project::verify_store`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StoreCheck {
     /// Objects checked.
     pub checked: usize,
@@ -481,7 +516,7 @@ pub struct StoreCheck {
 }
 
 /// Result of [`Project::prune_store`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Pruned {
     /// Objects kept.
     pub kept: usize,
@@ -492,7 +527,7 @@ pub struct Pruned {
 }
 
 /// Result of [`Project::refresh_index`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct IndexStats {
     /// Index file, relative to the project root.
     pub path: String,

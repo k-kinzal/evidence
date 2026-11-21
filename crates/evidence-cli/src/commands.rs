@@ -4,10 +4,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use evidence_core::format::{Kind, ObjectId, RunStatus, Severity};
+use evidence_core::format::{ObjectId, Output, RunStatus, Severity};
 use evidence_core::{
-    AddOptions, Health, Layer, LoadedConfig, MemberAction, Object, PairStatus, Project,
-    ReviewOptions, TreeNode, UpdateOptions,
+    AddOptions, Health, Layer, LoadedConfig, MemberAction, MigrateAction, MigrateOptions, Object,
+    PairStatus, PinOptions, PinReport, Project, TreeNode, UpdateOptions,
 };
 
 use crate::cli::{Cli, Command, ConfigCommand, IndexCommand, SchemaKind, StoreCommand, TreeFormat};
@@ -49,15 +49,28 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             force,
         } => remove(&ctx, &target, keep_subject, force),
         Command::Update(args) => run_update(&ctx, args),
+        Command::Migrate { targets, dry_run } => run_migrate(&ctx, targets, dry_run),
         Command::Outdated { targets, deny } => outdated(&ctx, &targets, &deny),
         Command::Status { targets } => show_status(&ctx, &targets),
         Command::Review {
             targets,
             claims,
             by,
-        } => run_review(&ctx, targets, claims, by),
+        } => run_review(&ctx, &targets, &claims, by),
         Command::Validate { targets, strict } => run_validate(&ctx, &targets, strict),
-        Command::Coverage { target, min, lines } => run_coverage(&ctx, &target, min, lines),
+        Command::Coverage {
+            target,
+            min,
+            lines,
+            requirements,
+            revision,
+        } => {
+            if requirements {
+                run_requirements(&ctx, &target, min, revision.as_deref())
+            } else {
+                run_coverage(&ctx, &target, min, lines)
+            }
+        }
         Command::Tree {
             target,
             invert,
@@ -108,7 +121,7 @@ fn init(ctx: &Ctx, path: Option<&Path>) -> Result<i32> {
             project.root().display()
         );
         say!(
-            "Next: `evidence add <subject> --kind source --stdout -- <program> <args>...`, then `evidence update`."
+            "Next: `evidence add <subject> --kind source --stdout -- <program> <args>...`, then `evidence update`; pin claims with `evidence update --pin <target>`."
         );
     }
     Ok(0)
@@ -119,14 +132,13 @@ fn add(ctx: &Ctx, args: crate::cli::AddArgs) -> Result<i32> {
     let path = project.add(&AddOptions {
         subject: args.subject,
         evid: args.evid,
-        kind: args.kind,
+        template: args.kind,
         id: args.id,
         title: args.title,
         run: args.run,
         stdout: args.stdout,
         inputs: args.inputs,
         interval: args.interval,
-        lifecycle: args.lifecycle,
         tags: args.tags,
     })?;
     if ctx.out.json {
@@ -168,6 +180,16 @@ fn remove(ctx: &Ctx, target: &str, keep_subject: bool, force: bool) -> Result<i3
 }
 
 fn run_update(ctx: &Ctx, args: crate::cli::UpdateArgs) -> Result<i32> {
+    if args.pin {
+        return run_pin(
+            ctx,
+            &PinOptions {
+                targets: args.targets,
+                by: args.by,
+                dry_run: args.dry_run,
+            },
+        );
+    }
     let report = ctx.project()?.update(&UpdateOptions {
         targets: args.targets,
         force: args.force,
@@ -206,7 +228,10 @@ fn run_update(ctx: &Ctx, args: crate::cli::UpdateArgs) -> Result<i32> {
             o.paint(why, Style::Dim)
         );
     }
-    if report.runs.is_empty() && report.members.is_empty() {
+    for s in &report.skipped {
+        say!("{} {}", o.paint("note     ", Style::Cyan), s.message);
+    }
+    if report.runs.is_empty() && report.members.is_empty() && report.skipped.is_empty() {
         say!("Everything is up to date.");
     }
     for run in &report.runs {
@@ -216,13 +241,33 @@ fn run_update(ctx: &Ctx, args: crate::cli::UpdateArgs) -> Result<i32> {
             Some(RunStatus::Unchanged) => o.paint("unchanged", Style::Dim),
             Some(RunStatus::Failed) => o.paint("failed   ", Style::Red),
         };
-        let snap = run.snapshot.as_deref().map(short).unwrap_or_default();
+        let mut detail = Vec::new();
+        if let Some(c) = &run.content {
+            detail.push(format!(
+                "subject {} {}",
+                if c.changed { "changed" } else { "unchanged" },
+                short(&c.snapshot)
+            ));
+        }
+        if let Some(c) = &run.claims {
+            detail.push(format!(
+                "claims +{} ~{} -{} ={}",
+                c.added.len(),
+                c.updated.len(),
+                c.removed.len(),
+                c.unchanged.len()
+            ));
+        }
+        if !run.pinned.is_empty() {
+            detail.push(format!("pinned {}", run.pinned.len()));
+        }
+        let reasons: Vec<&str> = run.reasons.iter().map(|r| r.message.as_str()).collect();
         say!(
-            "{status} {:<9} {} {}  {}",
-            run.operation.to_string(),
+            "{status} {}/{}  {}  {}",
             o.paint(&run.id, Style::Bold),
-            o.paint(snap, Style::Dim),
-            o.paint(run.reasons.join("; "), Style::Dim)
+            run.production,
+            detail.join(", "),
+            o.paint(reasons.join("; "), Style::Dim)
         );
         if let Some(msg) = &run.message
             && run.status == Some(RunStatus::Failed)
@@ -233,9 +278,108 @@ fn run_update(ctx: &Ctx, args: crate::cli::UpdateArgs) -> Result<i32> {
     if !report.affected.is_empty() {
         say!(
             "{} {}",
-            o.paint("Affected (review or update):", Style::Yellow),
+            o.paint(
+                "Affected (claims may need `evidence update --pin`):",
+                Style::Yellow
+            ),
             report.affected.join(", ")
         );
+    }
+    Ok(code)
+}
+
+fn run_pin(ctx: &Ctx, opts: &PinOptions) -> Result<i32> {
+    if opts.targets.is_empty() {
+        bail!("`--pin` needs targets: `<path or id>` or `<path or id>#<claim>`");
+    }
+    let report = ctx.project()?.pin(opts)?;
+    print_pins(ctx, &report)?;
+    Ok(if report.has_failures() {
+        EXIT_PROBLEMS
+    } else {
+        0
+    })
+}
+
+fn print_pins(ctx: &Ctx, report: &PinReport) -> Result<()> {
+    if ctx.out.json {
+        return ctx.out.emit("pin", report);
+    }
+    let o = &ctx.out;
+    let verb = if report.recorded {
+        o.paint("pinned   ", Style::Green)
+    } else if report.dry_run {
+        o.paint("would pin", Style::Cyan)
+    } else {
+        o.paint("not pinned", Style::Yellow)
+    };
+    for pair in &report.pairs {
+        for c in &pair.pinned {
+            let refs: Vec<String> = c
+                .evidence
+                .iter()
+                .map(|e| format!("{}@{}", e.key, short(&e.snapshot)))
+                .collect();
+            say!(
+                "{verb} {}#{}  subject {}  {}",
+                o.paint(&pair.id, Style::Bold),
+                c.claim,
+                short(&c.subject),
+                o.paint(refs.join(", "), Style::Dim)
+            );
+        }
+        for f in &pair.failed {
+            let what = f
+                .claim
+                .as_ref()
+                .map_or_else(|| pair.id.clone(), |c| format!("{}#{c}", pair.id));
+            say!(
+                "{} {what}: {}",
+                o.paint("failed   ", Style::Red),
+                f.reasons.join("; ")
+            );
+        }
+    }
+    if report.has_failures() && !report.dry_run {
+        warn_line!("nothing was recorded: every selected claim is pinned together or none is");
+    }
+    Ok(())
+}
+
+fn run_migrate(ctx: &Ctx, targets: Vec<String>, dry_run: bool) -> Result<i32> {
+    let report = ctx
+        .project()?
+        .migrate(&MigrateOptions { targets, dry_run })?;
+    let code = if report.blocked() { EXIT_PROBLEMS } else { 0 };
+    if ctx.out.json {
+        ctx.out.emit("migrate", &report)?;
+        return Ok(code);
+    }
+    let o = &ctx.out;
+    for f in &report.files {
+        let action = match (f.action, report.dry_run) {
+            (MigrateAction::Migrated, false) => o.paint("migrated   ", Style::Green),
+            (MigrateAction::Migrated, true) => o.paint("would migrate", Style::Cyan),
+            (MigrateAction::Current, _) => o.paint("current    ", Style::Dim),
+            (MigrateAction::Blocked, _) => o.paint("blocked    ", Style::Red),
+        };
+        let backup = f
+            .backup
+            .as_deref()
+            .filter(|_| !report.dry_run)
+            .map(|b| format!("  (backup: {b})"))
+            .unwrap_or_default();
+        say!("{action} {}{}", f.evid, o.paint(backup, Style::Dim));
+        for i in &f.issues {
+            let label = match i.severity {
+                Severity::Error => o.paint("error", Style::Red),
+                Severity::Warning => o.paint("note", Style::Yellow),
+            };
+            say!("    {label}[{}] {}", i.code, i.message);
+        }
+    }
+    if report.files.is_empty() {
+        say!("Nothing to migrate.");
     }
     Ok(code)
 }
@@ -293,15 +437,32 @@ fn show_status(ctx: &Ctx, targets: &[String]) -> Result<i32> {
     for s in &list {
         *counts.entry(s.health).or_insert(0) += 1;
         say!(
-            "{} {:<9} {:<24} {}",
+            "{} {:<9} {:<24} {}{}",
             ctx.out.health(s.health),
-            s.kind.as_str(),
+            s.content.as_str(),
             s.id,
-            ctx.out.paint(&s.subject, Style::Dim)
+            ctx.out.paint(&s.subject, Style::Dim),
+            if s.legacy {
+                ctx.out.paint("  [legacy format 1]", Style::Dim)
+            } else {
+                String::new()
+            }
         );
     }
     let summary: Vec<String> = counts.iter().map(|(h, n)| format!("{n} {h}")).collect();
     say!("{} pairs: {}", list.len(), summary.join(", "));
+    let legacy = list.iter().filter(|s| s.legacy).count();
+    if legacy > 0 {
+        say!(
+            "  note [legacy-format] {legacy} pair(s) in format version 1 are read-only; run `evidence migrate`"
+        );
+    }
+    let pending = project.pending_adoptions();
+    if pending > 0 {
+        say!(
+            "  note [pending-commit] {pending} interrupted adoption(s) will be completed by the next update"
+        );
+    }
     let errors = project.problems().iter().filter(|d| d.is_error()).count();
     if errors > 0 {
         warn_line!("{errors} error(s) in evidence files; run `evidence validate`");
@@ -309,32 +470,26 @@ fn show_status(ctx: &Ctx, targets: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-fn run_review(
-    ctx: &Ctx,
-    targets: Vec<String>,
-    claims: Vec<String>,
-    by: Option<String>,
-) -> Result<i32> {
-    let results = ctx.project()?.review(&ReviewOptions {
-        targets,
-        claims,
-        by,
-    })?;
-    let skipped = results.iter().any(|r| !r.skipped.is_empty());
-    if ctx.out.json {
-        ctx.out.emit("review", &results)?;
+fn run_review(ctx: &Ctx, targets: &[String], claims: &[String], by: Option<String>) -> Result<i32> {
+    warn_line!(
+        "warning: `evidence review` is deprecated; use `evidence update --pin <target>[#<claim>]`"
+    );
+    let targets = if claims.is_empty() {
+        targets.to_vec()
     } else {
-        for r in &results {
-            say!("Reviewed {}: {} claim(s) pinned", r.id, r.pinned.len());
-            for (claim, reason) in &r.skipped {
-                say!(
-                    "  {} {claim}: {reason}",
-                    ctx.out.paint("skipped", Style::Yellow)
-                );
-            }
-        }
-    }
-    Ok(if skipped { EXIT_PROBLEMS } else { 0 })
+        targets
+            .iter()
+            .flat_map(|t| claims.iter().map(move |c| format!("{t}#{c}")))
+            .collect()
+    };
+    run_pin(
+        ctx,
+        &PinOptions {
+            targets,
+            by,
+            dry_run: false,
+        },
+    )
 }
 
 fn run_validate(ctx: &Ctx, targets: &[String], strict: bool) -> Result<i32> {
@@ -386,21 +541,27 @@ fn run_coverage(ctx: &Ctx, target: &str, min: Option<f64>, lines: bool) -> Resul
     let o = &ctx.out;
     let c = &report.counts;
     say!(
-        "{}  {:.1}% backed ({:.1}% by evidence, rest primary)",
+        "{} {}  {:.1}% backed ({:.1}% by matched claims, rest primary)",
         o.paint(&report.subject, Style::Bold),
+        o.paint(short(&report.snapshot), Style::Dim),
         report.ratio * 100.0,
         report.evidence_ratio * 100.0
     );
+    if report.working_differs {
+        warn_line!(
+            "note: the working file differs from the adopted version; coverage is of the adopted version"
+        );
+    }
     say!(
-        "  covered {}  primary {}  stale {}  broken {}  uncovered {}  (non-blank lines)",
-        c.covered,
+        "  matched {}  primary {}  stale {}  broken {}  uncovered {}  (non-blank lines)",
+        c.matched,
         c.primary,
         c.stale,
         c.broken,
         c.uncovered
     );
     if lines {
-        let text = std::fs::read_to_string(&pair.subject_path)?;
+        let text = project.snapshot_text(&report.snapshot)?;
         for (i, (line, status)) in text.lines().zip(&report.lines).enumerate() {
             say!("{} {:>5} | {line}", o.line_status(*status), i + 1);
         }
@@ -427,11 +588,70 @@ fn run_coverage(ctx: &Ctx, target: &str, min: Option<f64>, lines: bool) -> Resul
             "  claim {} {:<24} lines {lines}  {}",
             o.claim(claim.health),
             claim.id,
-            o.paint(claim.reasons.join("; "), Style::Dim)
+            o.paint(
+                claim
+                    .reasons
+                    .iter()
+                    .map(|r| r.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                Style::Dim
+            )
         );
         if let Some(s) = &claim.suggestion {
             say!("        hint: {s}");
         }
+    }
+    for p in &report.unresolved_primary {
+        say!("  {} primary {p}", o.paint("unresolved", Style::Yellow));
+    }
+    Ok(if below { EXIT_PROBLEMS } else { 0 })
+}
+
+fn run_requirements(
+    ctx: &Ctx,
+    target: &str,
+    min: Option<f64>,
+    revision: Option<&str>,
+) -> Result<i32> {
+    let project = ctx.project()?;
+    let pair = project.find(target)?;
+    let report = project.requirement_coverage(pair, revision)?;
+    let below = min.is_some_and(|m| report.ratio * 100.0 < m);
+    if ctx.out.json {
+        ctx.out.emit("requirements", &report)?;
+        return Ok(if below { EXIT_PROBLEMS } else { 0 });
+    }
+    let o = &ctx.out;
+    say!(
+        "{} {}  {:.1}% of {} requirement(s) matched",
+        o.paint(&report.id, Style::Bold),
+        o.paint(short(&report.snapshot), Style::Dim),
+        report.ratio * 100.0,
+        report.requirements.len()
+    );
+    for r in &report.requirements {
+        let lines = r
+            .lines
+            .map_or_else(|| "?".into(), |(a, b)| format!("{a}-{b}"));
+        let by: Vec<String> = r
+            .claims
+            .iter()
+            .map(|c| {
+                let rev = c
+                    .revision
+                    .as_deref()
+                    .map(|v| format!("@{}", short(v)))
+                    .unwrap_or_default();
+                format!("{}#{} ({}{rev})", c.id, c.claim, c.health)
+            })
+            .collect();
+        say!(
+            "  {:<14} {:<20} lines {lines:<8} {}",
+            r.state.as_str(),
+            r.id,
+            o.paint(by.join(", "), Style::Dim)
+        );
     }
     Ok(if below { EXIT_PROBLEMS } else { 0 })
 }
@@ -458,10 +678,21 @@ fn render_tree(
     } else {
         format!(" [{}]", ctx.out.health(health).trim_end())
     };
+    let relation = if node.relations.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = node.relations.iter().map(|r| r.as_str()).collect();
+        format!(
+            " via {}{}",
+            names.join("+"),
+            if node.fixed { "@revision" } else { "" }
+        )
+    };
     say!(
         "{prefix}{connector}{} {}{h}{mark}",
         node.id,
-        ctx.out.paint(&node.kind, Style::Dim)
+        ctx.out
+            .paint(format!("{}{relation}", node.content.as_str()), Style::Dim)
     );
     let child_prefix = if root {
         String::new()
@@ -527,10 +758,20 @@ fn why(ctx: &Ctx, target: &str) -> Result<i32> {
     for r in &st.reasons {
         say!("  - [{}] {}", r.code, r.message);
     }
+    for n in &st.notices {
+        let detail = n.detail.map(|d| format!("/{d}")).unwrap_or_default();
+        say!("  note [{}{detail}] {}", n.code, n.message);
+    }
     for c in &st.claims {
         if let Some(s) = &c.suggestion {
             say!("  hint ({}): {s}", c.id);
         }
+    }
+    let pending = project.pending_adoptions();
+    if pending > 0 {
+        say!(
+            "  note [pending-commit] {pending} interrupted adoption(s) will be completed by the next update"
+        );
     }
     let downstream = project.downstream(&pair.id);
     if !downstream.is_empty() {
@@ -559,7 +800,7 @@ fn show(ctx: &Ctx, target: &str) -> Result<i32> {
     say!(
         "{} {}",
         o.paint(&pair.id, Style::Bold),
-        o.paint(format!("({})", f.kind), Style::Dim)
+        o.paint(format!("({})", f.content_mode().as_str()), Style::Dim)
     );
     if let Some(t) = &f.title {
         say!("  title:      {t}");
@@ -567,37 +808,66 @@ fn show(ctx: &Ctx, target: &str) -> Result<i32> {
     say!("  subject:    {}", pair.subject_rel);
     say!("  evidence:   {}", pair.evid_rel);
     say!("  status:     {}", o.health(view.status.health).trim_end());
-    if let Some(p) = f.producer() {
-        say!("  run:        {}", p.run.join(" "));
+    if pair.legacy {
+        say!("  format:     version 1 (run `evidence migrate`)");
     }
-    if f.kind == Kind::Authored {
-        say!("  lifecycle:  {}", f.lifecycle());
+    for p in &f.productions {
+        let writes: Vec<&str> = p
+            .writes
+            .iter()
+            .map(|w| match w {
+                Output::Subject => "subject",
+                Output::Claims => "claims",
+            })
+            .collect();
+        let ns = p
+            .namespace
+            .as_deref()
+            .map(|n| format!(" namespace {n}"))
+            .unwrap_or_default();
+        say!(
+            "  production: {} writes {}{ns}: {}",
+            p.name,
+            writes.join("+"),
+            p.run.join(" ")
+        );
     }
     if !f.tags.is_empty() {
         say!("  tags:       {}", f.tags.join(", "));
     }
     if let Some(state) = &f.state {
-        if let Some(s) = state.snapshot {
-            say!("  snapshot:   {s}");
+        if let Some(c) = &state.content {
+            say!("  adopted:    {} at {}", c.snapshot, c.updated_at);
         }
-        if let Some(t) = state.updated_at {
-            say!("  updated:    {t}");
-        }
-        if let Some(t) = state.checked_at {
-            say!("  checked:    {t}");
-        }
-        if !state.locator.is_empty() {
-            say!("  locator:");
-            for (k, v) in &state.locator {
+        for (name, r) in &state.runs {
+            say!(
+                "  last run:   {name} at {}{}",
+                r.at,
+                if r.legacy { " (unverified)" } else { "" }
+            );
+            for (k, v) in &r.locator {
                 say!("    {k} = {v}");
             }
         }
     }
+    if view.working_differs {
+        say!("  working:    differs from the adopted version");
+    }
+    let rel = |e: &evidence_core::Edge| {
+        format!(
+            "{} ({}{})",
+            e.id,
+            e.relation.as_str(),
+            if e.fixed { "@revision" } else { "" }
+        )
+    };
     if !view.dependencies.is_empty() {
-        say!("  depends on: {}", view.dependencies.join(", "));
+        let list: Vec<String> = view.dependencies.iter().map(rel).collect();
+        say!("  depends on: {}", list.join(", "));
     }
     if !view.dependents.is_empty() {
-        say!("  used by:    {}", view.dependents.join(", "));
+        let list: Vec<String> = view.dependents.iter().map(rel).collect();
+        say!("  used by:    {}", list.join(", "));
     }
     for c in &view.status.claims {
         let lines = c
@@ -612,6 +882,9 @@ fn show(ctx: &Ctx, target: &str) -> Result<i32> {
     }
     for r in &view.status.reasons {
         say!("  {} {}", o.paint("!", Style::Yellow), r.message);
+    }
+    for n in &view.status.notices {
+        say!("  {} {}", o.paint("note", Style::Cyan), n.message);
     }
     Ok(0)
 }

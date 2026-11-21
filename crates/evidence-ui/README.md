@@ -19,7 +19,8 @@ overview.
 ### Sidebar
 
 - A filter box, which accepts IME input.
-- Filters: all, needs attention, or one kind.
+- Filters: all, needs attention, one content mode (editable or produced), runnable (has a
+  production), with claims, or with diagnostics.
 - Every pair, with a health dot.
 
 ### Overview
@@ -30,14 +31,14 @@ overview.
 
 ### Pair page
 
-The header shows kind, health, lifecycle, and reasons. The page has four tabs:
+The header shows the content mode, health, reasons, and notices. The page has four tabs:
 
 | Tab | Shows |
 |-----|-------|
-| **Content** | The subject with line numbers, per-line coverage colors and claim labels, and a coverage bar. Directory subjects are shown as a listing |
-| **Evidence** | Claims with their status, reasons, and re-anchoring hints; the state and locator; the evidence file itself |
+| **Content** | The subject with line numbers, per-line coverage colors and claim labels, and a coverage bar, for any pair. When a produced subject was modified outside a run, the working file is shown without the adopted version's coverage overlay |
+| **Evidence** | Productions and their last runs; claims with their status, reasons, notices, and re-anchoring hints; references fixed to a revision, with a diff from that revision to the current version; the evidence file itself |
 | **Graph** | Upstream, downstream, and transitive impact. Click to navigate; ⌘[ goes back |
-| **History** | Runs and reviews. Click one to diff its snapshot against the previous one |
+| **History** | Runs, pins, and migrations. Click one to diff its snapshot against the previous one |
 
 ### Shortcuts and appearance
 

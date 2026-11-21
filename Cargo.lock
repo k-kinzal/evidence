@@ -1843,7 +1843,6 @@ dependencies = [
  "clap_complete",
  "evidence-core",
  "insta",
- "jsonschema",
  "predicates",
  "serde",
  "serde_json",

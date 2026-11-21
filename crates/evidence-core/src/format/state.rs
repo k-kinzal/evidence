@@ -1,4 +1,8 @@
-//! Tool-managed state (`[state]`) of an evidence file.
+//! Tool-managed state (`[state]`) of an evidence file, format version 2.
+//!
+//! The state keeps three kinds of records apart (see `docs/semantics.md`): the content a
+//! produced subject adopted, the run record (and failed attempt) of each production, and the
+//! pin of each claim. Claims returned by productions are kept here too.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -8,35 +12,30 @@ use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// State written by the tool after runs and reviews. Humans must not edit it.
+use crate::format::evid::Claim;
+
+/// Version of the fingerprint algorithms written by this version of Evidence.
+pub const FINGERPRINT_VERSION: u32 = 1;
+
+/// State written by the tool after runs and pins. Humans must not edit it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct State {
-    /// Snapshot of the subject accepted by the last successful run or review.
+    /// Produced subjects: the version adopted by the last successful run that wrote it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "Option<SnapshotIdSchema>")]
-    pub snapshot: Option<ObjectId>,
-    /// When the subject content last changed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "Option<TimestampSchema>")]
-    pub updated_at: Option<Timestamp>,
-    /// When the subject was last successfully checked against its source (even if unchanged).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "Option<TimestampSchema>")]
-    pub checked_at: Option<Timestamp>,
-    /// Where the content came from (the evaluated `locator` table, e.g. a git commit).
+    pub content: Option<ContentRecord>,
+    /// The last successful run of each production, by production name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub locator: BTreeMap<String, String>,
-    /// Snapshot of each input used by the last successful run.
+    pub runs: BTreeMap<String, RunRecord>,
+    /// The last failed attempt of each production (kept apart from its run record).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    #[schemars(with = "BTreeMap<String, SnapshotIdSchema>")]
-    pub inputs: BTreeMap<String, ObjectId>,
-    /// Pins of each claim, recorded at review.
+    pub failures: BTreeMap<String, FailedAttempt>,
+    /// Claims returned by claim-writing productions, by production name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub claims: BTreeMap<String, ClaimState>,
-    /// Result of the most recent run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_run: Option<LastRun>,
+    pub generated: BTreeMap<String, Vec<Claim>>,
+    /// The pin of each claim, by claim id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pins: BTreeMap<String, PinRecord>,
     /// Members: the parent's list entry this member was last produced from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member: Option<MemberState>,
@@ -47,6 +46,155 @@ impl State {
     pub fn is_empty(&self) -> bool {
         self == &Self::default()
     }
+}
+
+/// The adopted version of a produced subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContentRecord {
+    /// Snapshot of the adopted content.
+    #[schemars(with = "SnapshotIdSchema")]
+    pub snapshot: ObjectId,
+    /// When the adopted content last changed.
+    #[schemars(with = "TimestampSchema")]
+    pub updated_at: Timestamp,
+    /// The production that wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production: Option<String>,
+    /// The run that wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+}
+
+/// The last successful run of a production.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RunRecord {
+    /// Run id (absent for records migrated from format version 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// When the run finished (the last successful check, even if nothing changed).
+    #[schemars(with = "TimestampSchema")]
+    pub at: Timestamp,
+    /// Fingerprint of the production definition the run used (absent for migrated records).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<SnapshotIdSchema>")]
+    pub fingerprint: Option<ObjectId>,
+    /// Version of the fingerprint algorithm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint_version: Option<u32>,
+    /// The subject version the run wrote, or read (claims-only runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<SnapshotIdSchema>")]
+    pub subject: Option<ObjectId>,
+    /// The version of each input actually used, by input name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, InputVersion>,
+    /// Claim-writing productions: the ids of the claims returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claims: Option<Vec<String>>,
+    /// Claim-writing productions: the namespace the run wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// Where the content came from (the evaluated `locator` table).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub locator: BTreeMap<String, String>,
+    /// Migrated from format version 1: the definition used is not known.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy: bool,
+}
+
+/// The version of an input used by a run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InputVersion {
+    /// Evidence id.
+    pub id: String,
+    /// Snapshot used.
+    #[schemars(with = "SnapshotIdSchema")]
+    pub snapshot: ObjectId,
+    /// Hash of the selected part, when the input selects one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<SnapshotIdSchema>")]
+    pub fragment: Option<ObjectId>,
+    /// The input names a fixed revision.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fixed: bool,
+}
+
+/// A failed attempt of a production.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FailedAttempt {
+    /// When the attempt finished.
+    #[schemars(with = "TimestampSchema")]
+    pub at: Timestamp,
+    /// Run id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// What went wrong.
+    pub message: String,
+}
+
+/// The pin of a claim: the versions it was confirmed against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PinRecord {
+    /// When the pin was recorded.
+    #[schemars(with = "TimestampSchema")]
+    pub recorded_at: Timestamp,
+    /// Who recorded it (a person, or the production for automatic pins).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_by: Option<String>,
+    /// The run that recorded it (automatic pins).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// Fingerprint of the normalized claim definition (absent for migrated pins).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<SnapshotIdSchema>")]
+    pub definition: Option<ObjectId>,
+    /// Version of the fingerprint algorithm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint_version: Option<u32>,
+    /// The subject version and the hash of the claimed range.
+    pub content: PinnedContent,
+    /// The claimed text, as a hint for re-anchoring suggestions (short ranges only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+    /// The version of each reference.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<PinnedReference>,
+    /// Migrated from format version 1: needs a new pin.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy: bool,
+}
+
+/// The subject side of a pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PinnedContent {
+    /// Snapshot of the subject (absent for some migrated pins).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<SnapshotIdSchema>")]
+    pub snapshot: Option<ObjectId>,
+    /// Hash of the claimed range.
+    #[schemars(with = "SnapshotIdSchema")]
+    pub fragment: ObjectId,
+}
+
+/// One pinned reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PinnedReference {
+    /// Reference key (`id`, `id:path`, `id#selector`, `…@revision`).
+    pub key: String,
+    /// Snapshot of the referenced subject.
+    #[schemars(with = "SnapshotIdSchema")]
+    pub snapshot: ObjectId,
+    /// Hash of the selected part (when the reference has a selector or path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<SnapshotIdSchema>")]
+    pub fragment: Option<ObjectId>,
 }
 
 /// The list entry a member was produced from.
@@ -62,76 +210,32 @@ pub struct MemberState {
     pub fields: BTreeMap<String, String>,
 }
 
-/// Pins of one claim.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ClaimState {
-    /// When the claim was last reviewed.
-    #[schemars(with = "TimestampSchema")]
-    pub reviewed_at: Timestamp,
-    /// Who reviewed it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reviewed_by: Option<String>,
-    /// Hash of the claimed range of the subject at review time.
-    #[schemars(with = "SnapshotIdSchema")]
-    pub content: ObjectId,
-    /// The claimed text at review time, used to re-anchor the claim after edits
-    /// (only kept for short ranges).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<String>,
-    /// Pinned evidence.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evidence: Vec<Pin>,
-}
-
-/// One pinned evidence reference.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Pin {
-    /// Reference key (`id`, `id:path`, `id#selector`).
-    pub key: String,
-    /// Snapshot of the referenced subject at pin time.
-    #[schemars(with = "SnapshotIdSchema")]
-    pub snapshot: ObjectId,
-    /// Hash of the selected fragment at pin time (when the reference has a selector or path).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "Option<SnapshotIdSchema>")]
-    pub fragment: Option<ObjectId>,
-}
-
-/// Result of a run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct LastRun {
-    /// When the run finished.
-    #[schemars(with = "TimestampSchema")]
-    pub at: Timestamp,
-    /// Result.
-    pub status: RunStatus,
-    /// Error or informational message.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
 /// Result of a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
-    /// A new snapshot was accepted.
+    /// The run succeeded and adopted a new subject version.
     Changed,
-    /// The run succeeded and the content did not change.
+    /// The run succeeded; the subject did not change (or the production writes no subject).
     Unchanged,
-    /// The run, schema validation, or verification failed; the previous snapshot was kept.
+    /// The run, a check, or adoption failed; previous records were kept.
     Failed,
+}
+
+impl RunStatus {
+    /// Lowercase name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Changed => "changed",
+            Self::Unchanged => "unchanged",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 impl fmt::Display for RunStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Changed => "changed",
-            Self::Unchanged => "unchanged",
-            Self::Failed => "failed",
-        })
+        f.write_str(self.as_str())
     }
 }
 

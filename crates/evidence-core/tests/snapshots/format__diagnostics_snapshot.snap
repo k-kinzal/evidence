@@ -3,22 +3,25 @@ source: crates/evidence-core/tests/format.rs
 expression: out
 ---
 ## schema.json.evid
-error[schema] schema.json.evid:7 (/source/interval): invalid duration `soon`: use e.g. `30m`, `6h`, `1d`, `2weeks`, `1h 30m`
+error[schema] schema.json.evid:8 (/productions/0/interval): invalid duration `soon`: use e.g. `30m`, `6h`, `1d`, `2weeks`, `1h 30m`
 ## semantic.md.evid
-error[id] semantic.md.evid:3 (/id): invalid id `Bad Id`: use lowercase letters, digits, `.`, `_`, `-`
-error[claim] semantic.md.evid:5 (/claims/0): claim `c` needs `evidence` or `origin = "primary"`
+error[id] semantic.md.evid:2 (/id): invalid id `Bad Id`: use lowercase letters, digits, `.`, `_`, `-`
 error[duplicate] semantic.md.evid:9 (/claims/1): claim id `c` is used twice
-error[claim] semantic.md.evid:9 (/claims/1): claim `c` has both `evidence` and `origin`; choose one
+error[reference] semantic.md.evid:12 (/claims/1/evidence/0/as): `as` belongs in production inputs, not claim references
 ## syntax.json.evid
 error[toml] syntax.json.evid:2: string values must be quoted, expected literal string
 ## command.json.evid
-error[action-field] command.json.evid:7 (/transform/interval): `interval` is only allowed in `[source]`, not `[transform]`
-error[run] command.json.evid:8 (/transform/locator/commit): locator `commit` needs a program
-error[placeholder] command.json.evid:6 (/transform/run/3): `{input.sbom}` does not name an input of `c`
-error[placeholder] command.json.evid:6 (/transform/run/4): unknown placeholder `{outptu}` (known: output, subject, root, dir, id, cache, context, input.NAME, input.NAME.snapshot, env.NAME)
-error[placeholder] command.json.evid:8 (/transform/locator/token): `{env.NAME}` is not allowed in a locator value: the locator is written to the evidence file, and environment variables may hold secrets
+error[run] command.json.evid:8 (/productions/0/locator/commit): locator `commit` needs a program
+error[placeholder] command.json.evid:7 (/productions/0/run/3): `{input.sbom}` does not name an input of `t`
+error[placeholder] command.json.evid:7 (/productions/0/run/4): unknown placeholder `{outptu}` (known: output, claims, subject, root, dir, id, cache, context, input.NAME, input.NAME.snapshot, env.NAME)
+error[placeholder] command.json.evid:7 (/productions/0/run/5): `{claims}` is only available to productions that write claims
+error[placeholder] command.json.evid:8 (/productions/0/locator/token): `{env.NAME}` is not allowed in a locator value: the locator is written to the evidence file, and environment variables may hold secrets
 error[action-field] command.json.evid:11 (/verify/stdout): `stdout` is not allowed in `[verify]`: a check reads `{output}`
-## kind.json.evid
-error[kind-field] kind.json.evid: kind `derived` requires a `[transform]` table
-error[kind-field] kind.json.evid: kind `derived` requires at least one input
-error[kind-field] kind.json.evid:4 (/source): `source` is not allowed for kind `derived`
+## namespaces.json.evid
+error[namespace] namespaces.json.evid:11 (/productions/1/namespace): namespace `gen.sub` overlaps `gen` of production `a`
+error[namespace] namespaces.json.evid:14 (/claims/0/id): claim `gen.mine` lies in namespace `gen` of production `a`; hand-written claims must use other ids
+## legacy.json.evid
+error[kind-field] legacy.json.evid: kind `derived` requires a `[transform]` table
+error[kind-field] legacy.json.evid: kind `derived` requires at least one input
+error[kind-field] legacy.json.evid:4 (/source): `source` is not allowed for kind `derived`
+warning[legacy-format] legacy.json.evid (/version): format version 1: read-only until migrated with `evidence migrate`

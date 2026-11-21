@@ -1,11 +1,12 @@
 # Raw findings from BigQuery
-version = 1
-kind = "source"
+version = 2
 id = "vulns-raw"
 title = "Raw vulnerability findings"
 tags = ["vuln", "raw"]
 
-[source]
+[[productions]]
+name = "fetch"
+writes = ["subject"]
 run = ["bq", "query", "--format=json", "--nouse_legacy_sql"]   # any program
 stdin = "queries/vulns.sql"
 stdout = true

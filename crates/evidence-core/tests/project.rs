@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use evidence_core::format::RunStatus;
 use evidence_core::{
-    ClaimHealth, Health, LineStatus, Object, Project, ReviewOptions, UpdateOptions, UpdateReport,
+    ClaimHealth, Health, LineStatus, Object, PinOptions, Project, UpdateOptions, UpdateReport,
 };
 
 struct Fixture {
@@ -48,13 +48,25 @@ impl Fixture {
         self.project().update(&opts).unwrap()
     }
 
+    fn pin(&self, targets: &[&str]) {
+        let report = self
+            .project()
+            .pin(&PinOptions {
+                targets: targets.iter().map(|t| (*t).to_owned()).collect(),
+                by: Some("tester".into()),
+                dry_run: false,
+            })
+            .unwrap();
+        assert!(report.recorded, "{report:?}");
+    }
+
     fn health(&self, id: &str) -> Health {
         let p = self.project();
         p.status(p.pair(id).unwrap()).health
     }
 
-    /// upstream/vulns.json (outside evidence) -> raw (source, `cp`) -> high (derived, `jq`)
-    /// -> report.md (authored).
+    /// upstream/vulns.json (outside evidence) -> raw (fetched with `cp`) -> high (filtered with
+    /// `jq`) -> report.md (editable, with a claim on `high`).
     fn pipeline(&self) {
         self.write(
             "upstream/vulns.json",
@@ -66,11 +78,12 @@ impl Fixture {
         );
         self.write(
             "data/raw.json.evid",
-            r#"version = 1
-kind = "source"
+            r#"version = 2
 id = "raw"
 
-[source]
+[[productions]]
+name = "fetch"
+writes = ["subject"]
 run = ["cp", "../upstream/vulns.json", "{output}"]
 interval = "1h"
 locator = { path = "upstream/vulns.json" }
@@ -84,12 +97,13 @@ run = ["jq", "-e", "length > 0", "{output}"]
         );
         self.write(
             "data/high.json.evid",
-            r#"version = 1
-kind = "derived"
+            r#"version = 2
 id = "high"
-inputs = ["raw"]
 
-[transform]
+[[productions]]
+name = "filter"
+writes = ["subject"]
+inputs = ["raw"]
 run = ["jq", "[.[] | select(.severity == \"high\")]", "{input.raw}"]
 stdout = true
 "#,
@@ -100,27 +114,23 @@ stdout = true
         );
         self.write(
             "reports/triage.md.evid",
-            r###"version = 1
-kind = "authored"
+            r###"version = 2
 id = "triage"
-lifecycle = "living"
 
 [[claims]]
 id = "findings"
 select = { heading = "## Findings" }
 evidence = [{ ref = "high", select = { json_pointer = "/0" } }]
 
-[[claims]]
-id = "background"
+[[primary]]
 select = { lines = "9-10" }
-origin = "primary"
 "###,
         );
     }
 }
 
 #[test]
-fn full_pipeline_update_review_and_coverage() {
+fn full_pipeline_update_pin_and_coverage() {
     let fx = Fixture::new();
     fx.pipeline();
 
@@ -142,8 +152,8 @@ fn full_pipeline_update_review_and_coverage() {
     assert!(!fx.read("data/high.json").contains("CVE-2"));
     // State lives in the evidence file (and the definition is untouched).
     let evid = fx.read("data/raw.json.evid");
-    assert!(evid.starts_with("version = 1\nkind = \"source\""));
-    assert!(evid.contains("[state]") && evid.contains("snapshot = \"sha256:"));
+    assert!(evid.starts_with("version = 2\nid = \"raw\""));
+    assert!(evid.contains("[state.content]") && evid.contains("snapshot = \"sha256:"));
     assert!(
         evid.contains("path = \"upstream/vulns.json\""),
         "locator: {evid}"
@@ -154,19 +164,13 @@ fn full_pipeline_update_review_and_coverage() {
     // Nothing is due or stale now.
     assert!(fx.update(|_| {}).runs.is_empty());
 
-    // The report is not reviewed yet: stale claim; primary lines count as primary.
+    // The report is not pinned yet: stale claim; primary lines count as primary.
     assert_eq!(fx.health("triage"), Health::Stale);
-    fx.project()
-        .review(&ReviewOptions {
-            targets: vec!["triage".into()],
-            by: Some("tester".into()),
-            ..ReviewOptions::default()
-        })
-        .unwrap();
+    fx.pin(&["triage"]);
     assert_eq!(fx.health("triage"), Health::Ok);
     let p = fx.project();
     let cov = p.coverage(p.pair("triage").unwrap()).unwrap();
-    assert_eq!(cov.counts.covered, 2, "{:?}", cov.segments);
+    assert_eq!(cov.counts.matched, 2, "{:?}", cov.segments);
     assert_eq!(cov.counts.primary, 1, "line 9 (line 10 is blank)");
     assert_eq!(
         cov.counts.uncovered, 3,
@@ -184,7 +188,7 @@ fn full_pipeline_update_review_and_coverage() {
     assert_eq!(report.runs[1].status, Some(RunStatus::Unchanged));
     assert_eq!(fx.health("triage"), Health::Ok);
 
-    // A relevant change makes the living report stale, pointing at the claim.
+    // A relevant change makes the report stale, pointing at the claim's reference.
     fx.write(
         "upstream/vulns.json",
         r#"[{"id":"CVE-1","severity":"high","fixed":true}]"#,
@@ -201,28 +205,27 @@ fn full_pipeline_update_review_and_coverage() {
     assert_eq!(st.health, Health::Stale);
     let findings = st.claims.iter().find(|c| c.id == "findings").unwrap();
     assert_eq!(findings.health, ClaimHealth::Stale);
+    assert_eq!(findings.reasons[0].code, "reference-changed");
     assert!(
-        findings.reasons[0].contains("high#json_pointer=/0"),
+        findings.reasons[0].message.contains("high#json_pointer=/0"),
         "{:?}",
         findings.reasons
     );
 }
 
 #[test]
-fn snapshot_lifecycle_ignores_upstream_changes_but_not_edits() {
+fn fixed_revisions_ignore_upstream_changes_but_not_edits() {
     let fx = Fixture::new();
     fx.pipeline();
-    let evid = fx
-        .read("reports/triage.md.evid")
-        .replace("\"living\"", "\"snapshot\"");
-    fx.write("reports/triage.md.evid", &evid);
     fx.update(|_| {});
-    fx.project()
-        .review(&ReviewOptions {
-            targets: vec!["reports/triage.md".into()],
-            ..ReviewOptions::default()
-        })
-        .unwrap();
+    let p = fx.project();
+    let high = p.status(p.pair("high").unwrap()).snapshot.unwrap();
+    let evid = fx.read("reports/triage.md.evid").replace(
+        "select = { json_pointer = \"/0\" } }",
+        &format!("select = {{ json_pointer = \"/0\" }}, revision = \"{high}\" }}"),
+    );
+    fx.write("reports/triage.md.evid", &evid);
+    fx.pin(&["reports/triage.md"]);
     fx.write(
         "upstream/vulns.json",
         r#"[{"id":"CVE-9","severity":"high"}]"#,
@@ -231,10 +234,10 @@ fn snapshot_lifecycle_ignores_upstream_changes_but_not_edits() {
     assert_eq!(
         fx.health("triage"),
         Health::Ok,
-        "snapshot reports stay pinned"
+        "a fixed revision does not follow upstream changes"
     );
 
-    // Editing the claimed text requires a new review, and the old text is re-anchored.
+    // Editing the claimed text breaks the claim: its heading is gone.
     let text = fx
         .read("reports/triage.md")
         .replace("## Findings", "## Findings (updated)");
@@ -320,7 +323,7 @@ fn intervals_isolation_and_dry_run() {
         "raw is due; high would cascade: {:?}",
         plan.runs
     );
-    assert!(plan.runs[0].reasons[0].contains("interval"));
+    assert_eq!(plan.runs[0].reasons[0].code, "due");
     assert!(plan.runs.iter().all(|r| r.status.is_none()));
 
     // --isolated updates only the selection and reports dependents as affected.
@@ -339,7 +342,7 @@ fn intervals_isolation_and_dry_run() {
     );
     assert_eq!(fx.health("high"), Health::Stale);
 
-    // A plain update now catches up the stale derived pair.
+    // A plain update now catches up the stale filtered pair.
     let report = fx.update(|_| {});
     assert_eq!(report.runs.len(), 1);
     assert_eq!(report.runs[0].id, "high");
@@ -394,11 +397,12 @@ fn directory_sources_and_store_prune() {
     let first = git(&upstream, &["rev-parse", "HEAD"]);
     fx.write(
         "mirror.evid",
-        r#"version = 1
-kind = "source"
+        r#"version = 2
 id = "mirror"
 
-[source]
+[[productions]]
+name = "sync"
+writes = ["subject"]
 run = ["git", "clone", "-q", "--depth=1", "--branch", "main", "file://{root}/upstream-repo", "{output}"]
 locator = { remote = "upstream-repo", ref = "main", commit = ["git", "-C", "{output}", "rev-parse", "HEAD"] }
 "#,
@@ -406,10 +410,10 @@ locator = { remote = "upstream-repo", ref = "main", commit = ["git", "-C", "{out
     fx.update(|_| {});
     assert_eq!(fx.read("mirror/sub/b.txt"), "b");
     let p = fx.project();
-    let state = p.pair("mirror").unwrap().file.state.clone().unwrap();
-    assert_eq!(state.locator["commit"], first);
-    assert_eq!(state.locator["ref"], "main");
-    let snap = state.snapshot.unwrap();
+    let state = p.pair("mirror").unwrap().file.state();
+    assert_eq!(state.runs["sync"].locator["commit"], first);
+    assert_eq!(state.runs["sync"].locator["ref"], "main");
+    let snap = state.content.unwrap().snapshot;
     assert_eq!(
         p.object(&format!("{snap}:sub/b.txt")).unwrap(),
         Object::File(b"b".to_vec())
@@ -424,9 +428,9 @@ locator = { remote = "upstream-repo", ref = "main", commit = ["git", "-C", "{out
     let report = fx.update(|o| o.force = true);
     assert_eq!(report.runs[0].status, Some(RunStatus::Changed));
     let p = fx.project();
-    let state = p.pair("mirror").unwrap().file.state.clone().unwrap();
+    let state = p.pair("mirror").unwrap().file.state();
     assert_eq!(
-        state.locator["commit"],
+        state.runs["sync"].locator["commit"],
         git(&upstream, &["rev-parse", "HEAD"])
     );
     // The old tree is still referenced by history, so it survives a normal prune.
@@ -443,11 +447,11 @@ fn cycles_and_unknown_refs_are_reported() {
     let fx = Fixture::new();
     fx.write(
         "a.json.evid",
-        "version = 1\nkind = \"derived\"\nid = \"a\"\ninputs = [\"b\"]\n[transform]\nrun = [\"cp\", \"{input.b}\", \"{output}\"]\n",
+        "version = 2\nid = \"a\"\n[[productions]]\nname = \"t\"\nwrites = [\"subject\"]\ninputs = [\"b\"]\nrun = [\"cp\", \"{input.b}\", \"{output}\"]\n",
     );
     fx.write(
         "b.json.evid",
-        "version = 1\nkind = \"derived\"\nid = \"b\"\ninputs = [\"a\", \"ghost\"]\n[transform]\nrun = [\"cp\", \"{input.a}\", \"{output}\"]\n",
+        "version = 2\nid = \"b\"\n[[productions]]\nname = \"t\"\nwrites = [\"subject\"]\ninputs = [\"a\", \"ghost\"]\nrun = [\"cp\", \"{input.a}\", \"{output}\"]\n",
     );
     let p = fx.project();
     let codes: Vec<_> = p.problems().iter().map(|d| d.code).collect();
@@ -468,7 +472,7 @@ fn directory_subjects_are_not_scanned_for_evidence_files() {
     fx.write("vendor/repo/inner.json.evid", "garbage");
     fx.write(
         "vendor/repo.evid",
-        "version = 1\nkind = \"source\"\nid = \"repo\"\n[source]\nrun = [\"git\", \"clone\", \"x\", \"{output}\"]\n",
+        "version = 2\nid = \"repo\"\n[[productions]]\nname = \"sync\"\nwrites = [\"subject\"]\nrun = [\"git\", \"clone\", \"x\", \"{output}\"]\n",
     );
     let p = fx.project();
     assert_eq!(p.pairs().len(), 1);
@@ -481,22 +485,37 @@ fn validate_reports_command_and_schema_problems() {
     fx.pipeline();
     fx.write(
         "bad.json.evid",
-        "version = 1\nkind = \"source\"\nid = \"bad\"\n[source]\nrun = [\"cp\", \"{input.nope}\", \"{output}\"]\nnot_an_option = 1\n",
+        "version = 2\nid = \"bad\"\n[[productions]]\nname = \"p\"\nwrites = [\"subject\"]\nrun = [\"cp\", \"{input.nope}\", \"{output}\"]\nnot_an_option = 1\n",
     );
     fx.write(
         "ghost.json.evid",
-        "version = 1\nkind = \"source\"\nid = \"ghost\"\n[source]\nrun = [\"no-such-program-xyz\", \"{output}\"]\n",
+        "version = 2\nid = \"ghost\"\n[[productions]]\nname = \"p\"\nwrites = [\"subject\"]\nrun = [\"no-such-program-xyz\", \"{output}\"]\n",
     );
     let p = fx.project();
     let diags = p.validate(&[]).unwrap();
     let codes: Vec<_> = diags.iter().map(|d| d.code).collect();
     assert!(codes.contains(&"schema"), "unknown key: {codes:?}");
     assert!(codes.contains(&"program-not-found"), "{codes:?}");
-    assert!(codes.contains(&"missing-subject"), "{codes:?}");
+    assert!(
+        codes.contains(&"input-not-ready"),
+        "never produced: {codes:?}"
+    );
+    std::fs::remove_file(fx.root.join("reports/triage.md")).unwrap();
+    let codes: Vec<_> = fx
+        .project()
+        .validate(&[])
+        .unwrap()
+        .iter()
+        .map(|d| d.code)
+        .collect();
+    assert!(
+        codes.contains(&"missing-subject"),
+        "an editable subject: {codes:?}"
+    );
 
     fx.write(
         "bad.json.evid",
-        "version = 1\nkind = \"source\"\nid = \"bad\"\n[source]\nrun = [\"cp\", \"{input.nope}\", \"{output}\"]\n",
+        "version = 2\nid = \"bad\"\n[[productions]]\nname = \"p\"\nwrites = [\"subject\"]\nrun = [\"cp\", \"{input.nope}\", \"{output}\"]\n",
     );
     let p = fx.project();
     let diags = p.validate(&[]).unwrap();
@@ -526,33 +545,36 @@ fn concurrent_modification_is_refused() {
         })
         .unwrap_err();
     assert!(matches!(err, evidence_core::Error::Locked(_)));
-    let _ = Path::new("");
 }
 
-/// An authored subject with a `generator` (e.g. an AI command) is regenerated when its
-/// evidence changes, and its claims are re-pinned by the run, so it never needs a manual review.
+/// A production that writes the subject and claims (e.g. an AI command) runs when its inputs
+/// change, and pins the claims it generated, so they never need a manual pin. Its claims are
+/// replaced as a set; a hand-written claim beside them keeps its own pin.
 #[test]
-fn generators_regenerate_and_repin_authored_subjects() {
+fn productions_regenerate_subjects_and_their_claims() {
     let fx = Fixture::new();
     fx.pipeline();
     std::fs::remove_file(fx.root.join("reports/triage.md")).unwrap();
-    // `cat` stands in for an AI agent (e.g. `["claude", "-p", "… {context} …"]`): the output
-    // depends on the claimed evidence, which the `{context}` file describes.
+    // `write.sh` stands in for an AI agent (e.g. `["claude", "-p", "… {context} …"]`): it
+    // writes the subject and a claim per finding.
+    fx.write(
+        "reports/write.sh",
+        r#"jq -r '.[] | .id' "$1" > "$2"
+jq '{claims: [to_entries[] | {id: ("finding." + (.key|tostring)), select: {lines: ((.key + 1)|tostring)}, evidence: [{ref: "high", select: {json_pointer: ("/" + (.key|tostring))}}]}]}' "$1" > "$3"
+"#,
+    );
     fx.write(
         "reports/triage.md.evid",
-        r#"version = 1
-kind = "authored"
+        r#"version = 2
 id = "triage"
 author = "ai:test"
 
-[[claims]]
-id = "all"
-select = { whole = true }
-evidence = ["high"]
-
-[generator]
-run = ["cat", "{input.high}"]
-stdout = true
+[[productions]]
+name = "write"
+writes = ["subject", "claims"]
+namespace = "finding"
+inputs = ["high"]
+run = ["sh", "write.sh", "{input.high}", "{output}", "{claims}"]
 "#,
     );
     let run = |force: bool| {
@@ -567,30 +589,37 @@ stdout = true
     let report = run(false);
     let ids: Vec<_> = report.runs.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(ids, ["raw", "high", "triage"], "{:?}", report.runs);
-    assert!(fx.read("reports/triage.md").contains("CVE-1"));
+    assert_eq!(fx.read("reports/triage.md"), "CVE-1\n");
+    assert_eq!(report.runs[2].pinned, ["finding.0"]);
     assert_eq!(
         fx.health("triage"),
         Health::Ok,
-        "the generator run pinned the claims"
+        "the run pinned the claims it generated"
     );
 
     fx.write(
         "upstream/vulns.json",
-        r#"[{"id":"CVE-8","severity":"high"}]"#,
+        r#"[{"id":"CVE-8","severity":"high"},{"id":"CVE-9","severity":"high"}]"#,
     );
     let report = run(true);
-    assert_eq!(report.runs.last().unwrap().id, "triage");
-    assert!(
-        fx.read("reports/triage.md").contains("CVE-8"),
+    let last = report.runs.last().unwrap();
+    assert_eq!(last.id, "triage");
+    assert_eq!(last.pinned, ["finding.0", "finding.1"]);
+    assert_eq!(
+        fx.read("reports/triage.md"),
+        "CVE-8\nCVE-9\n",
         "regenerated from the new evidence"
     );
     assert_eq!(fx.health("triage"), Health::Ok);
     let history = fx.project().history("triage").unwrap();
     assert_eq!(history.len(), 2);
     assert!(
-        history.iter().all(|e| e.operation == "generate"),
+        history
+            .iter()
+            .all(|e| e.operation == "run" && e.production.as_deref() == Some("write")),
         "{history:?}"
     );
+    assert_eq!(history[1].pins.len(), 2);
 }
 
 /// Evidence files can describe a subject elsewhere; outside the project it works with a warning
@@ -601,13 +630,13 @@ fn declared_subjects_live_elsewhere() {
     fx.write("upstream.json", r#"[{"id":"CVE-1"}]"#);
     fx.write(
         "catalog/raw.evid",
-        "version = 1\nkind = \"source\"\nid = \"raw\"\nsubject = \"../data/raw.json\"\n[source]\nrun = [\"cp\", \"../upstream.json\", \"{output}\"]\n",
+        "version = 2\nid = \"raw\"\nsubject = \"../data/raw.json\"\n[[productions]]\nname = \"fetch\"\nwrites = [\"subject\"]\nrun = [\"cp\", \"../upstream.json\", \"{output}\"]\n",
     );
     // A directory subject declared elsewhere: evidence files inside it are content.
     fx.write("vendor/repo/inner.json.evid", "garbage");
     fx.write(
         "catalog/repo.evid",
-        "version = 1\nkind = \"authored\"\nid = \"repo\"\nsubject = \"../vendor/repo\"\norigin = \"primary\"\n",
+        "version = 2\nid = \"repo\"\nsubject = \"../vendor/repo\"\n[[primary]]\nselect = { whole = true }\n",
     );
     let p = fx.project();
     assert!(p.problems().is_empty(), "{:?}", p.problems());
@@ -631,7 +660,7 @@ fn declared_subjects_live_elsewhere() {
     // Two evidence files cannot describe the same subject.
     fx.write(
         "other/raw-again.evid",
-        "version = 1\nkind = \"authored\"\nid = \"again\"\nsubject = \"../data/raw.json\"\norigin = \"primary\"\n",
+        "version = 2\nid = \"again\"\nsubject = \"../data/raw.json\"\n",
     );
     let codes: Vec<_> = fx.project().problems().iter().map(|d| d.code).collect();
     assert_eq!(codes, ["duplicate-subject"]);
@@ -645,7 +674,7 @@ fn declared_subjects_live_elsewhere() {
     fx.write(
         "catalog/shared.evid",
         &format!(
-            "version = 1\nkind = \"derived\"\nid = \"shared\"\nsubject = \"{}\"\ninputs = [\"raw\"]\n[transform]\nrun = [\"cp\", \"{{input.raw}}\", \"{{output}}\"]\n",
+            "version = 2\nid = \"shared\"\nsubject = \"{}\"\n[[productions]]\nname = \"copy\"\nwrites = [\"subject\"]\ninputs = [\"raw\"]\nrun = [\"cp\", \"{{input.raw}}\", \"{{output}}\"]\n",
             outside.display()
         ),
     );
@@ -686,11 +715,12 @@ fn members_follow_their_list() {
     fx.write("upstream/3.md", "three\n");
     fx.write(
         "docs/pages.json.evid",
-        r#"version = 1
-kind = "source"
+        r#"version = 2
 id = "space"
 
-[source]
+[[productions]]
+name = "fetch"
+writes = ["subject"]
 run = ["cp", "../upstream/list.json", "{output}"]
 
 [members]
@@ -702,7 +732,9 @@ subject = "pages/{member.path}.md"
 title = "{member.title}"
 tags = ["page"]
 
-[members.template.source]
+[[members.template.productions]]
+name = "fetch"
+writes = ["subject"]
 run = ["cp", "{root}/upstream/{member.id}.md", "{output}"]
 "#,
     );
@@ -792,7 +824,7 @@ run = ["cp", "{root}/upstream/{member.id}.md", "{output}"]
     fx.write("report.md", "# R\n\nPage two says two.\n");
     fx.write(
         "report.md.evid",
-        "version = 1\nkind = \"authored\"\nid = \"report\"\n[[claims]]\nid = \"two\"\nselect = { lines = \"3\" }\nevidence = [\"page-2\"]\n",
+        "version = 2\nid = \"report\"\n[[claims]]\nid = \"two\"\nselect = { lines = \"3\" }\nevidence = [\"page-2\"]\n",
     );
 
     // Entries leave the list: kept and reported by default.

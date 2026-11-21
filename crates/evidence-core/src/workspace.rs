@@ -1,10 +1,16 @@
-//! Discovery of evidence pairs and the dependency graph.
+//! Discovery of evidence pairs, their relations, and the run graph of productions.
+//!
+//! Three relations connect pairs and are kept apart (INV 09): production inputs, claim
+//! references, and the structural `members` relation. Only inputs and `members` order runs;
+//! the run graph has one node per production.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::format::document::{self, EVID_SUFFIX};
-use crate::format::{Diagnostic, Entry, EvidenceFile, Format, MemberState, compose_file};
+use crate::format::{
+    Diagnostic, Entry, EvidenceFile, Format, MemberState, RefVersion, compose_file,
+};
 use serde::Serialize;
 
 use crate::error::{Error, Result};
@@ -30,10 +36,54 @@ pub struct Pair {
     pub outside_project: bool,
     /// Set when the pair is a member of a list (`member_of`).
     pub membership: Option<Membership>,
+    /// The evidence file is format version 1: readable, but it must be migrated before the
+    /// tool records anything in it.
+    pub legacy: bool,
+}
+
+/// How one pair relates to another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Relation {
+    /// An input of a production: a change is a reason to re-run it.
+    Input,
+    /// A reference of a claim: used to evaluate the claim, never to run anything.
+    Claim,
+    /// The parent whose list this member belongs to.
+    Member,
+}
+
+impl Relation {
+    /// Lowercase name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Claim => "claim",
+            Self::Member => "member",
+        }
+    }
+}
+
+/// A relation from a pair to another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Edge {
+    /// The other pair's id.
+    pub id: String,
+    /// The relation.
+    pub relation: Relation,
+    /// Only through fixed revisions: the current version of `id` does not matter.
+    pub fixed: bool,
+}
+
+/// A node of the run graph: one production of one pair.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct Node {
+    pub(crate) pair: String,
+    pub(crate) production: String,
 }
 
 /// A member pair's place in its parent's list.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Membership {
     /// Id of the parent, whose subject is the list.
     pub parent: String,
@@ -60,15 +110,62 @@ impl Pair {
         self.evid_path.parent().unwrap_or(Path::new("."))
     }
 
-    /// Ids this pair depends on: inputs, claim references, and the parent of a member.
-    pub(crate) fn dependencies(&self) -> Vec<&str> {
-        let mut deps = self.file.dependencies();
-        if let Some(m) = &self.membership
-            && !deps.contains(&m.parent.as_str())
-        {
-            deps.push(&m.parent);
+    /// Relations to other pairs: production inputs, claim references (hand-written and
+    /// generated), and the parent of a member. One edge per (id, relation); an edge is
+    /// `fixed` when every reference behind it names a fixed revision. References to the pair
+    /// itself are not edges.
+    pub fn edges(&self) -> Vec<Edge> {
+        let mut out: Vec<Edge> = Vec::new();
+        let mut add = |id: &str, relation: Relation, fixed: bool| {
+            if id == self.id {
+                return;
+            }
+            match out
+                .iter_mut()
+                .find(|e| e.id == id && e.relation == relation)
+            {
+                Some(e) => e.fixed &= fixed,
+                None => out.push(Edge {
+                    id: id.to_owned(),
+                    relation,
+                    fixed,
+                }),
+            }
+        };
+        for input in self.file.productions.iter().flat_map(|p| &p.inputs) {
+            add(input.id(), Relation::Input, input.is_fixed());
         }
-        deps
+        for (claim, _) in self.file.all_claims() {
+            for r in &claim.evidence {
+                add(r.id(), Relation::Claim, r.is_fixed());
+            }
+        }
+        if let Some(m) = &self.membership {
+            add(&m.parent, Relation::Member, false);
+        }
+        out
+    }
+
+    /// Ids of every pair this one relates to (any relation), deduplicated.
+    pub(crate) fn dependencies(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for e in self.edges() {
+            if !out.contains(&e.id) {
+                out.push(e.id);
+            }
+        }
+        out
+    }
+
+    /// Ids whose *current* version matters to this pair (edges that are not only fixed).
+    pub(crate) fn current_dependencies(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for e in self.edges().into_iter().filter(|e| !e.fixed) {
+            if !out.contains(&e.id) {
+                out.push(e.id);
+            }
+        }
+        out
     }
 
     /// Format of the subject: declared in the evidence file, or inferred from its extension.
@@ -80,8 +177,9 @@ impl Pair {
 }
 
 /// All pairs of a project.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct Workspace {
+    store: cas_fs::Store,
     pairs: Vec<Pair>,
     by_id: HashMap<String, usize>,
     member_files: Vec<MemberOnDisk>,
@@ -143,11 +241,22 @@ impl Workspace {
                 paths.push(path.to_path_buf());
             }
         }
-        Ok(Self::from_paths(layout, &paths))
+        Self::from_paths(layout, &paths)
     }
 
-    fn from_paths(layout: &Layout, paths: &[PathBuf]) -> Self {
-        let mut ws = Self::default();
+    /// The object store.
+    pub(crate) fn store(&self) -> &cas_fs::Store {
+        &self.store
+    }
+
+    fn from_paths(layout: &Layout, paths: &[PathBuf]) -> Result<Self> {
+        let mut ws = Self {
+            store: layout.store()?,
+            pairs: Vec::new(),
+            by_id: HashMap::new(),
+            member_files: Vec::new(),
+            diagnostics: Vec::new(),
+        };
         // Parse everything first: a directory subject declared by another evidence file (for
         // example a synced repository) may contain evidence files of its own, which are
         // content, not part of this project.
@@ -176,13 +285,14 @@ impl Workspace {
             let (Some(file), Some(subject)) = (parsed.file.clone(), subject.clone()) else {
                 continue;
             };
-            ws.insert(layout, &mut by_subject, path, file, subject, None);
+            let legacy = parsed.legacy.is_some();
+            ws.insert(layout, &mut by_subject, path, file, subject, None, legacy);
         }
 
         // Members: compose each definition from its parent's template and list entry.
         let mut lists: HashMap<String, Option<Vec<Entry>>> = HashMap::new();
         for pair in &ws.pairs {
-            let Some(listing) = crate::membership::listing(pair) else {
+            let Some(listing) = crate::membership::listing(&ws, pair) else {
                 continue;
             };
             let entries = match listing {
@@ -223,10 +333,20 @@ impl Workspace {
                 key: member.member.clone(),
             });
             let err = |code, msg: String| Diagnostic::error(code, msg).in_file(&rel);
-            let Some(members) = ws
-                .get(&member.member_of)
-                .and_then(|p| p.file.members.clone())
-            else {
+            let parent = ws.get(&member.member_of);
+            let parent_legacy = parent.is_some_and(|p| p.legacy);
+            // A version 1 parent's template was converted in memory; its version 1 members
+            // are composed from the template as written.
+            let members = if parent_legacy {
+                parent.and_then(|p| {
+                    document::read(&p.evid_path)
+                        .legacy
+                        .and_then(|l| l.members.clone())
+                })
+            } else {
+                parent.and_then(|p| p.file.members.clone())
+            };
+            let Some(members) = members else {
                 ws.diagnostics.push(err(
                     "unknown-ref",
                     format!(
@@ -240,9 +360,12 @@ impl Workspace {
             let current = list
                 .and_then(|l| l.iter().find(|e| e.key == member.member))
                 .map(|e| e.state.clone());
-            let known = current
-                .clone()
-                .or_else(|| member.state.as_ref().and_then(|s| s.member.clone()));
+            let recorded = member
+                .state
+                .as_ref()
+                .and_then(|s| s.get("member"))
+                .and_then(|m| serde_json::from_value::<MemberState>(m.clone()).ok());
+            let known = current.clone().or(recorded);
             let Some(known) = known else {
                 ws.diagnostics.push(err(
                     "member",
@@ -253,7 +376,8 @@ impl Workspace {
                 ));
                 continue;
             };
-            let (file, diagnostics) = compose_file(&members, member, &known.fields);
+            let version = if parent_legacy { 1 } else { 2 };
+            let (file, diagnostics) = compose_file(&members, member, &known.fields, version);
             ws.diagnostics
                 .extend(diagnostics.into_iter().map(|d| d.in_file(&rel)));
             let Some(file) = file else { continue };
@@ -273,32 +397,70 @@ impl Workspace {
                 file,
                 subject,
                 Some(membership),
+                parent_legacy || member.version == 1,
             );
         }
 
-        for pair in &ws.pairs {
-            for dep in pair.file.dependencies() {
-                if !ws.by_id.contains_key(dep) {
-                    ws.diagnostics.push(
+        ws.check_references();
+        if let Err(Error::Cycle(cycle)) = ws.run_levels() {
+            ws.diagnostics.push(Diagnostic::error(
+                "cycle",
+                format!("production cycle: {}", cycle.join(" -> ")),
+            ));
+        }
+        Ok(ws)
+    }
+
+    /// Unknown references (a fixed revision may name evidence that no longer exists), and
+    /// `satisfies` naming requirements the target does not declare.
+    fn check_references(&mut self) {
+        let mut found = Vec::new();
+        for pair in &self.pairs {
+            let refs = pair
+                .file
+                .productions
+                .iter()
+                .flat_map(|p| p.inputs.iter())
+                .chain(
+                    pair.file
+                        .all_claims()
+                        .into_iter()
+                        .flat_map(|(c, _)| &c.evidence),
+                );
+            let mut reported: Vec<&str> = Vec::new();
+            for r in refs {
+                let target = self.get(r.id());
+                if target.is_none()
+                    && r.version() == RefVersion::Current
+                    && !reported.contains(&r.id())
+                {
+                    reported.push(r.id());
+                    found.push(
                         Diagnostic::error(
                             "unknown-ref",
-                            format!("references unknown evidence `{dep}`"),
+                            format!("references unknown evidence `{}`", r.id()),
+                        )
+                        .in_file(&pair.evid_rel),
+                    );
+                }
+                if let (Some(req), Some(target)) = (r.satisfies(), target)
+                    && !target.file.requirements.iter().any(|q| q.id == req)
+                {
+                    found.push(
+                        Diagnostic::error(
+                            "unknown-requirement",
+                            format!("`{}` declares no requirement `{req}`", target.id),
                         )
                         .in_file(&pair.evid_rel),
                     );
                 }
             }
         }
-        if let Err(Error::Cycle(cycle)) = ws.topological_order() {
-            ws.diagnostics.push(Diagnostic::error(
-                "cycle",
-                format!("dependency cycle: {}", cycle.join(" -> ")),
-            ));
-        }
-        ws
+        self.diagnostics.extend(found);
     }
 
     /// Adds a pair, unless its id or subject is taken.
+    #[allow(clippy::too_many_arguments)]
     fn insert(
         &mut self,
         layout: &Layout,
@@ -307,6 +469,7 @@ impl Workspace {
         file: EvidenceFile,
         subject: PathBuf,
         membership: Option<Membership>,
+        legacy: bool,
     ) {
         let ws = self;
         let rel = layout.relative(path);
@@ -364,6 +527,7 @@ impl Workspace {
                 file,
                 outside_project,
                 membership,
+                legacy,
             });
         }
     }
@@ -387,125 +551,143 @@ impl Workspace {
         self.by_id.get(id).copied().map(move |i| &mut self.pairs[i])
     }
 
-    /// Ids this pair depends on that exist in the workspace.
+    /// Pairs this pair relates to (any relation) that exist in the workspace.
     pub(crate) fn dependencies(&self, id: &str) -> Vec<&Pair> {
         self.get(id)
             .map(|p| {
                 p.dependencies()
-                    .into_iter()
+                    .iter()
                     .filter_map(|d| self.get(d))
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    /// Pairs that depend directly on `id`.
+    /// Pairs that relate directly to `id` (any relation).
     pub(crate) fn dependents(&self, id: &str) -> Vec<&Pair> {
         self.pairs
             .iter()
-            .filter(|p| p.dependencies().contains(&id))
+            .filter(|p| p.dependencies().iter().any(|d| d == id))
             .collect()
     }
 
-    /// Every pair downstream of `id` (transitively), in topological order.
+    /// Pairs whose current version of `id` matters (any relation that is not only through
+    /// fixed revisions).
+    pub(crate) fn current_dependents(&self, id: &str) -> Vec<&Pair> {
+        self.pairs
+            .iter()
+            .filter(|p| p.current_dependencies().iter().any(|d| d == id))
+            .collect()
+    }
+
+    /// Every pair whose current version of `id` matters, transitively, in discovery order.
     pub(crate) fn downstream(&self, id: &str) -> Vec<&Pair> {
         let mut seen = HashSet::new();
         let mut stack = vec![id.to_owned()];
         while let Some(current) = stack.pop() {
-            for dep in self.dependents(&current) {
+            for dep in self.current_dependents(&current) {
                 if seen.insert(dep.id.clone()) {
                     stack.push(dep.id.clone());
                 }
             }
         }
-        self.topological_order()
-            .unwrap_or_else(|_| self.pairs.iter().collect())
-            .into_iter()
-            .filter(|p| seen.contains(&p.id))
+        self.pairs.iter().filter(|p| seen.contains(&p.id)).collect()
+    }
+
+    /// Every production, as a node of the run graph.
+    pub(crate) fn nodes(&self) -> Vec<Node> {
+        self.pairs
+            .iter()
+            .flat_map(|p| {
+                p.file.productions.iter().map(|q| Node {
+                    pair: p.id.clone(),
+                    production: q.name.clone(),
+                })
+            })
             .collect()
     }
 
-    /// Pairs ordered so that dependencies come first. Fails on cycles.
-    pub(crate) fn topological_order(&self) -> Result<Vec<&Pair>> {
-        Ok(self.levels()?.into_iter().flatten().collect())
+    /// The nodes a node must run after: the subject writer of each current input, the
+    /// subject writer of a member's parent, and, for a production that does not write the
+    /// subject, the subject writer of its own pair.
+    pub(crate) fn node_dependencies(&self, node: &Node) -> Vec<Node> {
+        let Some(pair) = self.get(&node.pair) else {
+            return Vec::new();
+        };
+        let Some(production) = pair.file.production(&node.production) else {
+            return Vec::new();
+        };
+        let writer = |id: &str| {
+            self.get(id).and_then(|p| {
+                p.file.subject_writer().map(|w| Node {
+                    pair: p.id.clone(),
+                    production: w.name.clone(),
+                })
+            })
+        };
+        let mut out: Vec<Node> = Vec::new();
+        let mut add = |n: Option<Node>| {
+            if let Some(n) = n
+                && n != *node
+                && !out.contains(&n)
+            {
+                out.push(n);
+            }
+        };
+        for input in &production.inputs {
+            if !input.is_fixed() {
+                add(writer(input.id()));
+            }
+        }
+        if let Some(m) = &pair.membership {
+            add(writer(&m.parent));
+        }
+        if !production.writes_subject() {
+            add(writer(&pair.id));
+        }
+        out
     }
 
-    /// Pairs grouped by depth: level 0 has no (known) dependencies, level n depends only on
-    /// lower levels. Pairs within a level are independent.
-    pub(crate) fn levels(&self) -> Result<Vec<Vec<&Pair>>> {
-        let mut indegree: BTreeMap<&str, usize> = BTreeMap::new();
-        for p in &self.pairs {
-            let deps = p
-                .dependencies()
-                .into_iter()
-                .filter(|d| self.by_id.contains_key(*d))
-                .count();
-            indegree.insert(&p.id, deps);
-        }
-        let mut levels = Vec::new();
+    /// Productions grouped by depth in the run graph: level 0 depends on nothing, level n
+    /// only on lower levels. Nodes within a level are independent. Fails on cycles.
+    pub(crate) fn run_levels(&self) -> Result<Vec<Vec<Node>>> {
+        let nodes = self.nodes();
+        let deps: BTreeMap<Node, Vec<Node>> = nodes
+            .iter()
+            .map(|n| (n.clone(), self.node_dependencies(n)))
+            .collect();
+        let mut indegree: BTreeMap<&Node, usize> = deps.iter().map(|(n, d)| (n, d.len())).collect();
+        let mut levels: Vec<Vec<Node>> = Vec::new();
         let mut done = 0;
-        let mut current: Vec<&str> = indegree
+        let mut current: Vec<&Node> = indegree
             .iter()
             .filter(|(_, d)| **d == 0)
-            .map(|(id, _)| *id)
+            .map(|(n, _)| *n)
             .collect();
         while !current.is_empty() {
             done += current.len();
-            let mut next = Vec::new();
-            for id in &current {
-                for dependent in self.dependents(id) {
-                    if let Some(d) = indegree.get_mut(dependent.id.as_str()) {
-                        *d -= 1;
-                        if *d == 0 {
-                            next.push(dependent.id.as_str());
+            let mut next: Vec<&Node> = Vec::new();
+            for n in &current {
+                for (m, d) in &deps {
+                    if d.contains(n)
+                        && let Some(k) = indegree.get_mut(m)
+                    {
+                        *k -= 1;
+                        if *k == 0 {
+                            next.push(m);
                         }
                     }
                 }
             }
-            levels.push(current.iter().filter_map(|id| self.get(id)).collect());
+            levels.push(current.iter().map(|n| (*n).clone()).collect());
             next.sort_unstable();
             next.dedup();
             current = next;
         }
-        if done < self.pairs.len() {
-            return Err(Error::Cycle(self.find_cycle()));
+        if done < nodes.len() {
+            return Err(Error::Cycle(find_cycle(&deps)));
         }
         Ok(levels)
-    }
-
-    fn find_cycle(&self) -> Vec<String> {
-        fn visit<'a>(
-            ws: &'a Workspace,
-            id: &'a str,
-            stack: &mut Vec<&'a str>,
-            done: &mut HashSet<&'a str>,
-        ) -> Option<Vec<String>> {
-            if let Some(pos) = stack.iter().position(|s| *s == id) {
-                let mut cycle: Vec<String> = stack[pos..].iter().map(|s| (*s).to_owned()).collect();
-                cycle.push(id.to_owned());
-                return Some(cycle);
-            }
-            if !done.insert(id) {
-                return None;
-            }
-            stack.push(id);
-            for dep in ws.get(id).map(Pair::dependencies).unwrap_or_default() {
-                if ws.get(dep).is_some()
-                    && let Some(c) = visit(ws, dep, stack, done)
-                {
-                    return Some(c);
-                }
-            }
-            stack.pop();
-            None
-        }
-        let mut done = HashSet::new();
-        for p in &self.pairs {
-            if let Some(c) = visit(self, &p.id, &mut Vec::new(), &mut done) {
-                return c;
-            }
-        }
-        Vec::new()
     }
 
     /// Resolves targets (ids or paths, relative to `cwd`) to pairs.
@@ -549,6 +731,40 @@ impl Workspace {
         out.retain(|p| seen.insert(p.id.clone()));
         Ok(out)
     }
+}
+
+fn find_cycle(deps: &BTreeMap<Node, Vec<Node>>) -> Vec<String> {
+    fn visit<'a>(
+        deps: &'a BTreeMap<Node, Vec<Node>>,
+        node: &'a Node,
+        stack: &mut Vec<&'a Node>,
+        done: &mut HashSet<&'a Node>,
+    ) -> Option<Vec<String>> {
+        let label = |n: &Node| format!("{}/{}", n.pair, n.production);
+        if let Some(pos) = stack.iter().position(|s| *s == node) {
+            let mut cycle: Vec<String> = stack[pos..].iter().map(|n| label(n)).collect();
+            cycle.push(label(node));
+            return Some(cycle);
+        }
+        if !done.insert(node) {
+            return None;
+        }
+        stack.push(node);
+        for dep in deps.get(node).into_iter().flatten() {
+            if let Some(c) = visit(deps, dep, stack, done) {
+                return Some(c);
+            }
+        }
+        stack.pop();
+        None
+    }
+    let mut done = HashSet::new();
+    for n in deps.keys() {
+        if let Some(c) = visit(deps, n, &mut Vec::new(), &mut done) {
+            return c;
+        }
+    }
+    Vec::new()
 }
 
 /// Where the subject of the evidence file at `evid_path` lives: its declared `subject`

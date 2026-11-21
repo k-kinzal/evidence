@@ -42,6 +42,15 @@ pub enum Error {
     /// The request is invalid.
     #[error("{0}")]
     Invalid(String),
+    /// The command line is wrong (conflicting or missing options).
+    #[error("{0}")]
+    Usage(String),
+    /// A file changed while it was being updated; nothing was recorded.
+    #[error("{0}")]
+    Conflict(String),
+    /// The evidence file is format version 1 and must be migrated first.
+    #[error("{0} is format version 1; run `evidence migrate` first")]
+    Legacy(String),
     /// The SQLite index failed (search falls back to scanning files).
     #[cfg(feature = "index")]
     #[error("index: {0}")]

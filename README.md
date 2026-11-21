@@ -2,8 +2,8 @@
 
 Evidence keeps a large body of collected, derived, and hand-written knowledge
 **traceable and fresh**. Every file (the *subject*) gets a small TOML sidecar (`<file>.evid`)
-recording where it came from, which exact snapshot it was built from, what it depends on, and
-whether it is still up to date. It works like a package manager for knowledge: `update`,
+declaring how it is produced (if it is), which claims it makes about other evidence, and
+recording the exact versions those were built from and confirmed against. It works like a package manager for knowledge: `update`,
 `outdated`, `tree`, `tree --invert`, `why`.
 
 It answers:
@@ -13,9 +13,10 @@ It answers:
 - **What is affected by this change?** Run `evidence tree --invert <id>`. `evidence update`
   re-runs dependents in order.
 - **Which parts of this report are backed by evidence?** Claims map ranges of a document to
-  evidence. `evidence coverage` shows covered, stale, broken, uncovered, and primary lines.
+  evidence. `evidence coverage` shows matched, stale, broken, uncovered, and primary lines;
+  `evidence coverage --requirements` shows which requirements are satisfied.
 - **What did the source look like when the report was written?** Pins plus the object store:
-  `evidence cat sha256:…`.
+  `evidence cat sha256:…`. A reference can also name a fixed `revision`.
 
 Evidence runs ordinary programs (`curl`, `git`, `bq`, `jq`, an SBOM tool, an AI agent) written
 in the evidence files, so anything a program can fetch or compute can be evidence. Everything
@@ -35,8 +36,8 @@ evidence add findings/high.json --kind derived --input raw --stdout -- \
 # A hand-written report: describe its claims in reports/triage.md.evid.
 evidence add reports/triage.md --kind authored
 
-evidence update             # run everything due or stale, in dependency order
-evidence review triage      # confirm the report against current evidence (pins claims)
+evidence update             # run productions that are due or stale, in input order
+evidence update --pin triage  # confirm the report's claims against current evidence
 evidence outdated           # what needs attention (use --deny stale in CI)
 evidence why triage         # explain a stale/broken pair
 evidence coverage triage    # line-level coverage of the report
@@ -47,21 +48,33 @@ Periodic refresh means calling `evidence update` from cron, systemd timers, or C
 
 | Command | Runs |
 |---------|------|
-| `evidence update` | every pair that is due (interval elapsed) or stale, plus dependents |
+| `evidence update` | every production that is due (interval elapsed) or has changed inputs, plus those that use its result |
 | `evidence update --force` | everything |
-| `evidence update <path or id>…` | the selection regardless of interval, plus dependents (`--isolated`: selection only, dependents just marked stale) |
+| `evidence update <path or id>…` | the selection regardless of interval, plus what uses it (`--isolated`: selection only, the rest reported as affected) |
 | `evidence update --dry-run` | prints the plan and the reason for each run |
+| `evidence update --pin <target>[#<claim>]…` | runs nothing; records the claims of the targets against the versions resolved now |
 
-Every command accepts `--json`. The output shapes are versioned and published in
-[`schemas/output/`](schemas/output). Exit codes: `0` ok, `1` problems found (failed runs,
-validation errors, denied states), `2` the command could not run.
+`--kind` of `evidence add` only chooses a template; version 2 files have no `kind`. A subject
+with a production that writes it is *produced*; any other subject is *editable*. Production
+inputs, claim references, and members are different relations: only inputs cause runs.
+
+Version 1 evidence files are read but never written; convert them with `evidence migrate`
+(see [docs/migration.md](docs/migration.md)).
+
+Every command accepts `--json`. The output is an envelope `{"version": 2, "<key>": …}`
+(see [docs/cli.md](docs/cli.md#json-output)). Exit codes: `0` ok, `1` problems found
+(failed runs, failed pins, blocked migrations, validation errors, denied states), `2` the
+command could not run (including usage errors such as `update --pin --force`).
 
 ## Desktop app
 
 `evidence-ui [PROJECT_DIR] [ID]` opens a wiki-like browser (GPUI). It shows:
 
-- every pair with its freshness;
-- subjects with coverage highlighting;
+- every pair with its freshness, filterable by content mode, runnable productions, claims,
+  and diagnostics;
+- subjects with coverage highlighting (never overlaid on a produced file modified outside a
+  run);
+- fixed revisions of references and their difference from the current version;
 - the evidence file, state, and locator;
 - upstream, downstream, and impact navigation;
 - history with snapshot diffs.
@@ -70,10 +83,15 @@ It refreshes automatically when files change.
 
 ## Documentation
 
-- [docs/format.md](docs/format.md): the evidence file format, commands and placeholders,
-  selectors, and state
-- [AGENTS.md](AGENTS.md): design, vocabulary, architecture, and engineering rules
-- `evidence schema evid` / `evidence schema config`: JSON Schemas (also in [`schemas/`](schemas))
+- [docs/semantics.md](docs/semantics.md): what every record means, invariants, and events
+- [docs/format-v2.md](docs/format-v2.md): the evidence file format, productions and
+  placeholders, claims, references, selectors, and state
+- [docs/cli.md](docs/cli.md): commands, exit codes, and JSON output
+- [docs/migration.md](docs/migration.md): converting version 1 files
+- [docs/traceability.md](docs/traceability.md): invariants and acceptance criteria mapped to
+  tests
+- `evidence schema evid` / `evidence schema config`: JSON Schemas of the evidence file and
+  configuration formats (also in [`schemas/`](schemas))
 
 ## Workspace
 
@@ -97,7 +115,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo nextest run --workspace --all-features && cargo test --doc --workspace
 cargo hack check --workspace --each-feature --no-dev-deps
 cargo deny check && cargo machete
-cargo xtask schemas --check
+cargo xtask schemas --check && cargo xtask vocabulary
 ```
 
 License: MIT OR Apache-2.0.

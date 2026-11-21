@@ -3,13 +3,14 @@
 //! | Placeholder | Value |
 //! |-------------|-------|
 //! | `{output}` | path the command writes the new subject to (for `[verify]`: the candidate) |
-//! | `{subject}` | current subject path |
+//! | `{claims}` | path the command writes its claims document to |
+//! | `{subject}` | read-only copy of the subject version the run sees |
 //! | `{root}` | project root |
 //! | `{dir}` | directory of the evidence file |
 //! | `{id}` | evidence id |
 //! | `{cache}` | persistent cache directory of this evidence (e.g. for an incremental clone) |
-//! | `{context}` | JSON file describing the run: id, subject, inputs with paths and snapshots |
-//! | `{input.NAME}` | path of input `NAME` |
+//! | `{context}` | JSON file describing the run: id, production, inputs with paths and snapshots |
+//! | `{input.NAME}` | read-only copy of input `NAME` at the captured version |
 //! | `{input.NAME.snapshot}` | snapshot id of input `NAME` |
 //! | `{env.NAME}` | environment variable `NAME` (error if unset) |
 //! | `{{` / `}}` | literal `{` / `}` |
@@ -18,7 +19,9 @@
 //! is composed from its parent's `[members]` template (see `format::member`).
 
 /// Names of the placeholders without a dot.
-pub(crate) const SIMPLE: &[&str] = &["output", "subject", "root", "dir", "id", "cache", "context"];
+pub(crate) const SIMPLE: &[&str] = &[
+    "output", "claims", "subject", "root", "dir", "id", "cache", "context",
+];
 
 /// A parsed placeholder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

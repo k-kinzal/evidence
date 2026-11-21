@@ -9,9 +9,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use evidence_core::format::Kind;
+use evidence_core::format::ContentMode;
 use evidence_core::{
-    CoverageReport, Event, Health, LineStatus, Pair, PairStatus, PairView, Project,
+    CoverageReport, Event, Health, LineStatus, Notice, Pair, PairStatus, PairView, Project,
 };
 
 /// Largest subject shown inline.
@@ -27,8 +27,16 @@ pub type Error = evidence_core::Error;
 pub struct PairRow {
     /// Evidence id.
     pub id: String,
-    /// Kind.
-    pub kind: Kind,
+    /// Whether the subject is editable or produced.
+    pub content: ContentMode,
+    /// Names of the productions (empty: nothing to run).
+    pub productions: Vec<String>,
+    /// Number of claims (hand-written and generated).
+    pub claims: usize,
+    /// Problems found in its evidence file.
+    pub diagnostics: usize,
+    /// Format version 1 (read-only until migrated).
+    pub legacy: bool,
     /// Title (or the id).
     pub title: String,
     /// Subject path relative to the project root.
@@ -49,18 +57,26 @@ pub enum Filter {
     All,
     /// Anything that is not ok (the "outdated" dashboard).
     Attention,
-    /// One kind.
-    Kind(Kind),
+    /// One content mode.
+    Content(ContentMode),
+    /// Pairs with at least one production.
+    Runnable,
+    /// Pairs with claims.
+    WithClaims,
+    /// Pairs whose evidence file has problems.
+    Diagnostics,
 }
 
 impl Filter {
     /// Every filter, in display order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::All,
         Self::Attention,
-        Self::Kind(Kind::Source),
-        Self::Kind(Kind::Derived),
-        Self::Kind(Kind::Authored),
+        Self::Content(ContentMode::Editable),
+        Self::Content(ContentMode::Produced),
+        Self::Runnable,
+        Self::WithClaims,
+        Self::Diagnostics,
     ];
 
     /// Label.
@@ -68,9 +84,11 @@ impl Filter {
         match self {
             Self::All => "All",
             Self::Attention => "Needs attention",
-            Self::Kind(Kind::Source) => "Sources",
-            Self::Kind(Kind::Derived) => "Derived",
-            Self::Kind(Kind::Authored) => "Authored",
+            Self::Content(ContentMode::Editable) => "Editable",
+            Self::Content(ContentMode::Produced) => "Produced",
+            Self::Runnable => "Runnable",
+            Self::WithClaims => "With claims",
+            Self::Diagnostics => "Diagnostics",
         }
     }
 
@@ -78,7 +96,10 @@ impl Filter {
         match self {
             Self::All => true,
             Self::Attention => row.health != Health::Ok,
-            Self::Kind(k) => row.kind == k,
+            Self::Content(c) => row.content == c,
+            Self::Runnable => !row.productions.is_empty(),
+            Self::WithClaims => row.claims > 0,
+            Self::Diagnostics => row.diagnostics > 0 || row.legacy,
         }
     }
 }
@@ -103,9 +124,27 @@ impl Browser {
             .iter()
             .filter_map(|s| {
                 let pair = project.pair(&s.id)?;
+                let diagnostics = project
+                    .problems()
+                    .iter()
+                    .filter(|d| {
+                        d.file
+                            .as_ref()
+                            .is_some_and(|f| f.to_string_lossy() == pair.evid_rel)
+                    })
+                    .count();
                 Some(PairRow {
                     id: s.id.clone(),
-                    kind: s.kind,
+                    content: s.content,
+                    productions: pair
+                        .file
+                        .productions
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect(),
+                    claims: s.claims.len(),
+                    diagnostics,
+                    legacy: s.legacy,
                     title: pair.file.title.clone().unwrap_or_else(|| s.id.clone()),
                     subject: s.subject.clone(),
                     health: s.health,
@@ -201,18 +240,31 @@ impl Browser {
     pub fn detail(&self, id: &str) -> Option<Detail> {
         let pair = self.project.pair(id)?;
         let view = self.project.show(pair);
-        let coverage = (pair.file.kind == Kind::Authored)
-            .then(|| self.project.coverage(pair).ok())
-            .flatten();
-        let content = content(pair, coverage.as_ref());
+        // Coverage of the current version: for a produced subject the adopted version, which
+        // is also what the preview shows (never a modified working file with an adopted
+        // overlay).
+        let coverage = self.project.coverage(pair).ok();
+        let content = match &coverage {
+            Some(cov)
+                if cov.working_differs || pair.file.content_mode() == ContentMode::Produced =>
+            {
+                stored_content(&self.project, pair, cov)
+            }
+            _ => content(pair, coverage.as_ref()),
+        };
         let history = self.project.history(id).unwrap_or_default();
-        let neighbors = |ids: &[String]| -> Vec<(String, Health)> {
-            ids.iter()
-                .map(|d| (d.clone(), self.health(d).unwrap_or(Health::Broken)))
-                .collect()
+        let neighbors = |edges: &[evidence_core::Edge]| -> Vec<(String, Health)> {
+            let mut out: Vec<(String, Health)> = Vec::new();
+            for e in edges {
+                if !out.iter().any(|(id, _)| *id == e.id) {
+                    out.push((e.id.clone(), self.health(&e.id).unwrap_or(Health::Broken)));
+                }
+            }
+            out
         };
         let upstream = neighbors(&view.dependencies);
         let downstream = neighbors(&view.dependents);
+        let fixed = fixed_references(&self.project, &view);
         let impact = self
             .project
             .downstream(id)
@@ -221,6 +273,8 @@ impl Browser {
             .collect();
         let evid_text = std::fs::read_to_string(&pair.evid_path).unwrap_or_default();
         Some(Detail {
+            working_differs: view.working_differs,
+            fixed,
             view,
             content,
             coverage,
@@ -241,6 +295,17 @@ impl Browser {
         ))
     }
 
+    /// Line diff between a fixed revision and the current version of the pair it names.
+    pub fn revision_diff(&self, id: &str, revision: &str) -> Result<Vec<DiffLine>, Error> {
+        let pair = self.project.find(id)?;
+        let current = self
+            .project
+            .status(pair)
+            .snapshot
+            .ok_or_else(|| Error::Invalid(format!("`{id}` has no current version")))?;
+        self.diff(revision, &current)
+    }
+
     /// Cheap change detector; when it changes, call [`Browser::reload`].
     pub fn fingerprint(&self) -> u64 {
         self.project.fingerprint()
@@ -252,16 +317,74 @@ impl Browser {
     }
 }
 
+/// A claim reference that names a fixed revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FixedReference {
+    /// Claim id.
+    pub claim: String,
+    /// Reference key.
+    pub key: String,
+    /// Referenced evidence id.
+    pub id: String,
+    /// The fixed revision.
+    pub revision: String,
+    /// The current version of the referenced pair (when it can be read).
+    pub current: Option<String>,
+    /// How the revision differs from the current version (`None`: it is the current one).
+    pub notice: Option<Notice>,
+}
+
+fn fixed_references(project: &Project, view: &PairView) -> Vec<FixedReference> {
+    let mut out = Vec::new();
+    for c in &view.status.claims {
+        for r in &c.references {
+            let Some(revision) = &r.revision else {
+                continue;
+            };
+            let current = project.pair(&r.id).and_then(|p| project.status(p).snapshot);
+            let notice = c
+                .notices
+                .iter()
+                .find(|n| n.code == "reference-current-diff" && n.message.contains(&r.key))
+                .cloned();
+            out.push(FixedReference {
+                claim: c.id.clone(),
+                key: r.key.clone(),
+                id: r.id.clone(),
+                revision: revision.clone(),
+                current,
+                notice,
+            });
+        }
+    }
+    out
+}
+
+/// Preview of the version coverage was computed on (a produced subject's adopted version).
+fn stored_content(project: &Project, pair: &Pair, cov: &CoverageReport) -> Content {
+    match project.snapshot_text(&cov.snapshot) {
+        Ok(text) if pair.format().is_text() && !pair.subject_path.is_dir() => {
+            text_content(&text, Some(cov))
+        }
+        _ => content(pair, Some(cov)),
+    }
+}
+
 /// Everything shown on a pair's page.
 #[derive(Debug, Clone)]
 pub struct Detail {
+    /// A produced subject's working file differs from the adopted version (the preview and
+    /// coverage show the adopted version).
+    pub working_differs: bool,
+    /// Claim references to fixed revisions, with their difference from the current version.
+    pub fixed: Vec<FixedReference>,
     /// Definition, state, and status.
     pub view: PairView,
     /// Subject preview.
     pub content: Content,
-    /// Coverage (authored subjects).
+    /// Coverage of the current version.
     pub coverage: Option<CoverageReport>,
-    /// Past runs and reviews, oldest first.
+    /// Past runs, pins, and migrations, oldest first.
     pub history: Vec<Event>,
     /// Direct dependencies and their health.
     pub upstream: Vec<(String, Health)>,
@@ -280,7 +403,7 @@ pub struct Line {
     pub number: usize,
     /// Text.
     pub text: String,
-    /// Coverage status (authored subjects).
+    /// Coverage status.
     pub status: Option<LineStatus>,
     /// Claims covering the line.
     pub claims: Vec<String>,
@@ -336,6 +459,10 @@ fn content(pair: &Pair, coverage: Option<&CoverageReport>) -> Content {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Content::Opaque { size: meta.len() };
     };
+    text_content(&text, coverage)
+}
+
+fn text_content(text: &str, coverage: Option<&CoverageReport>) -> Content {
     let mut claims_by_line: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     if let Some(cov) = coverage {
         for seg in &cov.segments {
@@ -418,7 +545,7 @@ pub fn diff_text(old: &str, new: &str) -> Vec<DiffLine> {
 #[cfg(unix)]
 mod tests {
     use super::*;
-    use evidence_core::{ReviewOptions, UpdateOptions};
+    use evidence_core::{PinOptions, UpdateOptions};
 
     fn project() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -428,12 +555,12 @@ mod tests {
         w("up.json", r#"[{"id":"CVE-1","severity":"high"}]"#);
         w(
             "raw.json.evid",
-            "version = 1\nkind = \"source\"\nid = \"raw\"\ntitle = \"Raw findings\"\ntags = [\"vuln\"]\n[source]\nrun = [\"cp\", \"up.json\", \"{output}\"]\n",
+            "version = 2\nid = \"raw\"\ntitle = \"Raw findings\"\ntags = [\"vuln\"]\n[[productions]]\nname = \"fetch\"\nwrites = [\"subject\"]\nrun = [\"cp\", \"up.json\", \"{output}\"]\n",
         );
         w("note.md", "# Note\n\nCVE-1 matters.\n\nOpinion.\n");
         w(
             "note.md.evid",
-            "version = 1\nkind = \"authored\"\nid = \"note\"\n[[claims]]\nid = \"c\"\nselect = { lines = \"3\" }\nevidence = [\"raw\"]\n",
+            "version = 2\nid = \"note\"\n[[claims]]\nid = \"c\"\nselect = { lines = \"3\" }\nevidence = [\"raw\"]\n",
         );
         (dir, root)
     }
@@ -452,6 +579,17 @@ mod tests {
             .unwrap();
     }
 
+    fn pin(root: &Path, target: &str) {
+        let report = Project::open(root)
+            .unwrap()
+            .pin(&PinOptions {
+                targets: vec![target.into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(report.recorded, "{report:?}");
+    }
+
     #[test]
     fn rows_filters_and_counts() {
         let (_d, root) = project();
@@ -459,14 +597,20 @@ mod tests {
         let b = Browser::open(&root).unwrap();
         assert_eq!(b.rows().len(), 2);
         assert_eq!(b.filtered(Filter::All, "").len(), 2);
-        assert_eq!(b.filtered(Filter::Kind(Kind::Source), "").len(), 1);
+        assert_eq!(
+            b.filtered(Filter::Content(ContentMode::Produced), "").len(),
+            1
+        );
+        assert_eq!(b.filtered(Filter::Runnable, "")[0].id, "raw");
+        assert_eq!(b.filtered(Filter::WithClaims, "")[0].id, "note");
+        assert!(b.filtered(Filter::Diagnostics, "").is_empty());
         assert_eq!(
             b.filtered(Filter::All, "VULN").len(),
             1,
             "tags are searchable"
         );
         assert_eq!(b.filtered(Filter::All, "raw findings")[0].id, "raw");
-        // The note is not reviewed yet.
+        // The note is not pinned yet.
         let attention = b.filtered(Filter::Attention, "");
         assert_eq!(attention.len(), 1);
         assert_eq!(attention[0].id, "note");
@@ -477,29 +621,71 @@ mod tests {
     fn detail_has_coverage_neighbors_and_history() {
         let (_d, root) = project();
         run_update(&root);
-        Project::open(&root)
-            .unwrap()
-            .review(&ReviewOptions {
-                targets: vec!["note".into()],
-                ..Default::default()
-            })
-            .unwrap();
+        pin(&root, "note");
         let b = Browser::open(&root).unwrap();
         let note = b.detail("note").unwrap();
         let Content::Text { lines, truncated } = &note.content else {
             panic!("{:?}", note.content)
         };
         assert!(!truncated);
-        assert_eq!(lines[2].status, Some(LineStatus::Covered));
+        assert_eq!(lines[2].status, Some(LineStatus::Matched));
         assert_eq!(lines[2].claims, vec!["c".to_owned()]);
         assert_eq!(lines[4].status, Some(LineStatus::Uncovered));
         assert_eq!(note.upstream, vec![("raw".to_owned(), Health::Ok)]);
-        assert_eq!(note.history.len(), 1, "the review");
+        assert_eq!(note.history.len(), 1, "the pin");
 
         let raw = b.detail("raw").unwrap();
         assert_eq!(raw.impact, vec!["note".to_owned()]);
-        assert!(raw.coverage.is_none());
-        assert!(raw.evid_text.contains("[state]"));
+        assert!(raw.coverage.is_some(), "coverage applies to any pair");
+        assert!(raw.evid_text.contains("[state"));
+    }
+
+    #[test]
+    fn a_modified_produced_file_is_not_overlaid() {
+        let (_d, root) = project();
+        run_update(&root);
+        std::fs::write(root.join("up.json.bak"), "x").unwrap();
+        std::fs::write(root.join("raw.json"), "[\"edited by hand\"]\n").unwrap();
+        let b = Browser::open(&root).unwrap();
+        let raw = b.detail("raw").unwrap();
+        assert!(raw.working_differs);
+        let Content::Text { lines, .. } = &raw.content else {
+            panic!("{:?}", raw.content)
+        };
+        assert!(
+            lines[0].text.contains("CVE-1"),
+            "the preview shows the adopted version the coverage is about"
+        );
+    }
+
+    #[test]
+    fn fixed_revisions_and_their_difference() {
+        let (_d, root) = project();
+        run_update(&root);
+        let first = Project::open(&root)
+            .unwrap()
+            .status(Project::open(&root).unwrap().pair("raw").unwrap())
+            .snapshot
+            .unwrap();
+        std::fs::write(
+            root.join("note.md.evid"),
+            format!(
+                "version = 2\nid = \"note\"\n[[claims]]\nid = \"c\"\nselect = {{ lines = \"3\" }}\nevidence = [{{ ref = \"raw\", revision = \"{first}\" }}]\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(root.join("up.json"), r#"[{"id":"CVE-2"}]"#).unwrap();
+        run_update_with(&root, true);
+        let b = Browser::open(&root).unwrap();
+        let note = b.detail("note").unwrap();
+        assert_eq!(note.fixed.len(), 1);
+        assert_eq!(note.fixed[0].revision, first);
+        assert!(note.fixed[0].notice.is_some());
+        let d = b.revision_diff("raw", &first).unwrap();
+        assert!(
+            d.iter()
+                .any(|l| matches!(l, DiffLine::Added(t) if t.contains("CVE-2")))
+        );
     }
 
     #[test]
@@ -511,7 +697,7 @@ mod tests {
             r#"[{"id":"CVE-2","severity":"high"}]"#,
         )
         .unwrap();
-        // No interval: the source only refreshes when asked.
+        // No interval: the production only runs again when asked.
         run_update_with(&root, true);
         let mut b = Browser::open(&root).unwrap();
         b.reload().unwrap();
@@ -536,11 +722,7 @@ mod tests {
         assert_eq!(b.detail("raw").unwrap().content, Content::Missing);
         std::fs::create_dir_all(root.join("mirror/sub")).unwrap();
         std::fs::write(root.join("mirror/sub/a.txt"), "a").unwrap();
-        std::fs::write(
-            root.join("mirror.evid"),
-            "version = 1\nkind = \"source\"\nid = \"mirror\"\n[source]\nrun = [\"cp\", \"-R\", \"x\", \"{output}\"]\n",
-        )
-        .unwrap();
+        std::fs::write(root.join("mirror.evid"), "version = 2\nid = \"mirror\"\n").unwrap();
         let b = Browser::open(&root).unwrap();
         assert_eq!(
             b.detail("mirror").unwrap().content,
@@ -562,7 +744,7 @@ mod fingerprint_tests {
         std::fs::write(root.join("a.md"), "a\n").unwrap();
         std::fs::write(
             root.join("a.md.evid"),
-            "version = 1\nkind = \"authored\"\nid = \"a\"\norigin = \"primary\"\n",
+            "version = 2\nid = \"a\"\n[[primary]]\nselect = { whole = true }\n",
         )
         .unwrap();
         let b = super::Browser::open(&root).unwrap();

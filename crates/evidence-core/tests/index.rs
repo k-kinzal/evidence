@@ -21,13 +21,13 @@ fn index_is_incremental_and_invisible_to_search() {
     .unwrap();
     std::fs::write(
         root.join("report.md.evid"),
-        "version = 1\nkind = \"source\"\nid = \"report\"\ntitle = \"Gateway report\"\ntags = [\"vuln\"]\n[source]\nrun = [\"cp\", \"upstream.md\", \"{output}\"]\n",
+        "version = 2\nid = \"report\"\ntitle = \"Gateway report\"\ntags = [\"vuln\"]\n[[productions]]\nname = \"fetch\"\nwrites = [\"subject\"]\nrun = [\"cp\", \"upstream.md\", \"{output}\"]\n",
     )
     .unwrap();
     std::fs::write(root.join("notes.md"), "unrelated\n").unwrap();
     std::fs::write(
         root.join("notes.md.evid"),
-        "version = 1\nkind = \"authored\"\nid = \"notes\"\norigin = \"primary\"\n",
+        "version = 2\nid = \"notes\"\n[[primary]]\nselect = { whole = true }\n",
     )
     .unwrap();
     // Changes keep the index in sync; a second refresh has nothing to do.

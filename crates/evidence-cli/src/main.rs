@@ -36,8 +36,12 @@ fn main() -> std::process::ExitCode {
             } else {
                 warn_line!("error: {err:#}");
             }
-            // 2 = the command itself could not run (usage, I/O, configuration).
-            std::process::ExitCode::from(2)
+            // A pin that met a concurrent change failed (1); anything else means the command
+            // itself could not run (2: usage, I/O, configuration, unmigrated files).
+            let conflict = err
+                .downcast_ref::<evidence_core::Error>()
+                .is_some_and(|e| matches!(e, evidence_core::Error::Conflict(_)));
+            std::process::ExitCode::from(if conflict { 1 } else { 2 })
         }
     }
 }

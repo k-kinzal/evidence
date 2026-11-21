@@ -92,7 +92,7 @@ impl Project {
         );
         self.write(
             "report.md.evid",
-            "version = 1\nkind = \"authored\"\nid = \"report\"\n\n[[claims]]\nid = \"findings\"\nselect = { heading = \"## Findings\" }\nevidence = [\"high\"]\n",
+            "version = 2\nid = \"report\"\n\n[[claims]]\nid = \"findings\"\nselect = { heading = \"## Findings\" }\nevidence = [\"high\"]\n",
         );
     }
 }
@@ -120,8 +120,9 @@ fn help_lists_cargo_style_commands() {
         .output()
         .unwrap();
     let text = String::from_utf8(out.stdout).unwrap();
+    assert!(!text.contains("review"), "the deprecated alias is hidden");
     for cmd in [
-        "update", "outdated", "tree", "why", "review", "coverage", "validate", "search",
+        "update", "migrate", "outdated", "tree", "why", "coverage", "validate", "search",
     ] {
         assert!(text.contains(cmd), "missing {cmd}");
     }
@@ -160,9 +161,9 @@ fn update_status_and_impact() {
     let out = p.stdout(&["update"]);
     insta::assert_snapshot!("update_first_run", redact(&out));
 
-    // Report has an unreviewed claim: stale. `--deny stale` makes CI fail.
+    // Report has an unpinned claim: stale. `--deny stale` makes CI fail.
     p.cmd(&["outdated", "--deny", "stale"]).assert().code(1);
-    p.cmd(&["review", "report"]).assert().success();
+    p.cmd(&["update", "--pin", "report"]).assert().success();
     p.cmd(&["outdated", "--deny", "stale"])
         .assert()
         .success()
@@ -170,7 +171,7 @@ fn update_status_and_impact() {
 
     insta::assert_snapshot!("tree_invert", p.stdout(&["tree", "--invert", "raw"]));
 
-    // Upstream change -> derived re-runs -> report becomes stale.
+    // Upstream change -> the filter re-runs -> the report's claim becomes stale.
     p.write(
         "upstream.json",
         r#"[{"id":"CVE-1","severity":"high","fixed":true}]"#,
@@ -208,10 +209,10 @@ fn coverage_and_minimum() {
     let p = Project::new();
     p.pipeline();
     p.cmd(&["update"]).assert().success();
-    p.cmd(&["review", "report.md"]).assert().success();
+    p.cmd(&["update", "--pin", "report.md"]).assert().success();
     let cov = p.json(&["coverage", "report.md"]);
     // The section runs to the end of the file; only the title is uncovered.
-    assert_eq!(cov["coverage"]["counts"]["covered"], 3);
+    assert_eq!(cov["coverage"]["counts"]["matched"], 3);
     assert_eq!(cov["coverage"]["counts"]["uncovered"], 1);
     p.cmd(&["coverage", "report", "--min", "90"])
         .assert()
@@ -250,7 +251,7 @@ fn failed_runs_exit_non_zero_and_keep_the_last_good_subject() {
 #[test]
 fn validate_reports_errors_with_locations() {
     let p = Project::new();
-    p.write("bad.json.evid", "version = 1\nkind = \"source\"\nid = \"bad\"\n\n[source]\nrun = [\"cp\", \"x\", \"{output}\"]\ninterval = \"soon\"\n");
+    p.write("bad.json.evid", "version = 2\nid = \"bad\"\n\n[[productions]]\nname = \"fetch\"\nwrites = [\"subject\"]\nrun = [\"cp\", \"x\", \"{output}\"]\ninterval = \"soon\"\n");
     let out = p
         .cmd(&["validate"])
         .assert()
@@ -259,7 +260,7 @@ fn validate_reports_errors_with_locations() {
         .stdout
         .clone();
     let text = String::from_utf8(out).unwrap();
-    assert!(text.contains("bad.json.evid:7"), "{text}");
+    assert!(text.contains("bad.json.evid:8"), "{text}");
     let json = p.json(&["validate"]);
     assert_eq!(json["diagnostics"][0]["severity"], "error");
 }
@@ -351,17 +352,17 @@ fn show_and_cat_snapshots() {
     p.pipeline();
     p.cmd(&["update"]).assert().success();
     let show = p.json(&["show", "raw"]);
-    let snap = show["pair"]["definition"]["state"]["snapshot"]
+    let snap = show["pair"]["definition"]["state"]["content"]["snapshot"]
         .as_str()
         .unwrap()
         .to_owned();
     assert_eq!(
-        show["pair"]["definition"]["source"]["run"],
+        show["pair"]["definition"]["productions"][0]["run"],
         serde_json::json!(["cp", "upstream.json", "{output}"])
     );
     assert!(
         p.stdout(&["show", "raw"])
-            .contains("run:        cp upstream.json {output}")
+            .contains("production: fetch writes subject: cp upstream.json {output}")
     );
     let content = p.stdout(&["cat", &snap]);
     assert!(content.contains("CVE-2"));
@@ -379,46 +380,51 @@ fn schemas_are_printed() {
     );
 }
 
-/// Every `--json` output conforms to its published schema in `schemas/output/`.
-/// Runs `evidence --json <args>` and checks the output against a published schema.
-fn matches_schema(p: &Project, schema: &str, args: &[&str]) -> Value {
-    let schemas = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas/output");
-    let text = std::fs::read_to_string(schemas.join(schema)).unwrap();
-    let schema: Value = serde_json::from_str(&text).unwrap();
-    let validator = jsonschema::validator_for(&schema).unwrap();
+/// Runs `evidence --json <args>` and checks that the output is an envelope
+/// `{"version": 2, "<key>": <payload>}`.
+fn envelope(p: &Project, key: &str, args: &[&str]) -> Value {
     let output = p.json(args);
-    let errors: Vec<String> = validator
-        .iter_errors(&output)
-        .map(|e| format!("{}: {e}", e.instance_path()))
-        .collect();
-    assert!(errors.is_empty(), "{args:?}: {errors:?}\n{output:#}");
+    let object = output
+        .as_object()
+        .unwrap_or_else(|| panic!("{args:?}: {output:#}"));
+    assert_eq!(
+        object.get("version"),
+        Some(&Value::from(2)),
+        "{args:?}: {output:#}"
+    );
+    assert!(object.contains_key(key), "{args:?}: no `{key}`: {output:#}");
+    assert_eq!(object.len(), 2, "{args:?}: {output:#}");
     output
 }
 
 #[test]
-fn json_output_matches_published_schemas() {
+fn json_output_is_an_envelope() {
     let p = Project::new();
     p.pipeline();
-    let check = |schema: &str, args: &[&str]| matches_schema(&p, schema, args);
-    check("update.schema.json", &["update", "--dry-run"]);
-    check("update.schema.json", &["update"]);
-    check("review.schema.json", &["review", "report"]);
-    check("status.schema.json", &["status"]);
-    check("outdated.schema.json", &["outdated"]);
-    check("why.schema.json", &["why", "report"]);
-    check("pair.schema.json", &["show", "raw"]);
-    check("pair.schema.json", &["show", "report"]);
-    check("coverage.schema.json", &["coverage", "report"]);
-    check("tree.schema.json", &["tree"]);
-    check("tree.schema.json", &["tree", "-i", "raw"]);
-    check("search.schema.json", &["search", "CVE"]);
-    check("history.schema.json", &["history", "raw"]);
-    check("validate.schema.json", &["validate"]);
-    check("store-verify.schema.json", &["store", "verify"]);
-    check("index.schema.json", &["index", "sync"]);
-    check("index.schema.json", &["index", "rebuild"]);
-    check("remove.schema.json", &["rm", "report"]);
-    check("store-prune.schema.json", &["store", "prune"]);
+    let check = |key: &str, args: &[&str]| envelope(&p, key, args);
+    check("update", &["update", "--dry-run"]);
+    check("update", &["update"]);
+    check("pin", &["update", "--pin", "--dry-run", "report"]);
+    check("pin", &["update", "--pin", "report"]);
+    check("pin", &["review", "report"]);
+    check("migrate", &["migrate", "--dry-run"]);
+    check("requirements", &["coverage", "--requirements", "report"]);
+    check("status", &["status"]);
+    check("outdated", &["outdated"]);
+    check("status", &["why", "report"]);
+    check("pair", &["show", "raw"]);
+    check("pair", &["show", "report"]);
+    check("coverage", &["coverage", "report"]);
+    check("tree", &["tree"]);
+    check("tree", &["tree", "-i", "raw"]);
+    check("hits", &["search", "CVE"]);
+    check("history", &["history", "raw"]);
+    check("diagnostics", &["validate"]);
+    check("verify", &["store", "verify"]);
+    check("index", &["index", "sync"]);
+    check("index", &["index", "rebuild"]);
+    check("removed", &["rm", "report"]);
+    check("prune", &["store", "prune"]);
 }
 
 /// `add --evid` keeps the evidence file apart from its subject and records `subject`;
@@ -490,16 +496,19 @@ fn members_of_a_list() {
     p.write("upstream/b.txt", "B\n");
     p.write(
         "pages.json.evid",
-        r#"version = 1
-kind = "source"
+        r#"version = 2
 id = "pages"
-[source]
+[[productions]]
+name = "fetch"
+writes = ["subject"]
 run = ["cp", "upstream/list.json", "{output}"]
 [members]
 key = "/id"
 id = "page-{member.id}"
 subject = "pages/{member.id}.txt"
-[members.template.source]
+[[members.template.productions]]
+name = "fetch"
+writes = ["subject"]
 run = ["cp", "{root}/upstream/{member.id}.txt", "{output}"]
 "#,
     );
@@ -514,9 +523,176 @@ run = ["cp", "{root}/upstream/{member.id}.txt", "{output}"]
         r#"[{"id":"a"},{"id":"b"},{"id":"c"}]"#,
     );
     p.write("upstream/c.txt", "C\n");
-    let report = matches_schema(&p, "update.schema.json", &["update", "pages"]);
+    let report = envelope(&p, "update", &["update", "pages"]);
     assert_eq!(report["update"]["members"][0]["action"], "added");
-    let show = matches_schema(&p, "pair.schema.json", &["show", "pages/c.txt"]);
+    let show = envelope(&p, "pair", &["show", "pages/c.txt"]);
     assert_eq!(show["pair"]["membership"]["parent"], "pages");
     p.cmd(&["rm", "page-a"]).assert().code(2);
+}
+
+fn read(p: &Project, rel: &str) -> String {
+    std::fs::read_to_string(p.dir.path().join(rel)).unwrap()
+}
+
+/// AC 25 and the exit codes of `--pin`: explicit targets only, never a run, and `--force` or
+/// `--isolated` with it is a usage error.
+#[test]
+fn pin_is_explicit_and_runs_nothing() {
+    let p = Project::new();
+    p.pipeline();
+    p.cmd(&["update"]).assert().success();
+    p.write(
+        "upstream.json",
+        r#"[{"id":"CVE-1","severity":"high","new":1}]"#,
+    );
+    let raw = read(&p, "raw.json.evid");
+    let before = read(&p, "report.md.evid");
+
+    p.cmd(&["update", "--pin"]).assert().code(2);
+    p.cmd(&["update", "--pin", "report#nope"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("report#nope"));
+    p.cmd(&["update", "--pin", "--force", "report"])
+        .assert()
+        .code(2);
+    p.cmd(&["update", "--pin", "--isolated", "report"])
+        .assert()
+        .code(2);
+    let dry = p.json(&["update", "--pin", "--dry-run", "report"]);
+    assert_eq!(dry["pin"]["recorded"], false);
+    assert_eq!(read(&p, "report.md.evid"), before, "dry run writes nothing");
+
+    p.cmd(&["update", "--pin", "report#findings"])
+        .assert()
+        .success();
+    assert_ne!(read(&p, "report.md.evid"), before);
+    assert_eq!(read(&p, "raw.json.evid"), raw, "nothing ran");
+    assert!(!read(&p, "raw.json").contains("new"));
+
+    // A broken claim fails the pin (1) and nothing is recorded.
+    p.write(
+        "report.md",
+        "# Report\n\n## Other\n\nCVE-1 is high.\n\nUnbacked.\n",
+    );
+    let pinned = read(&p, "report.md.evid");
+    p.cmd(&["update", "--pin", "report"]).assert().code(1);
+    assert_eq!(read(&p, "report.md.evid"), pinned);
+}
+
+/// `review` still works for one transition period, with a warning.
+#[test]
+fn review_is_a_deprecated_alias() {
+    let p = Project::new();
+    p.pipeline();
+    p.cmd(&["update"]).assert().success();
+    p.cmd(&["review", "report", "--claim", "findings"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("deprecated"));
+    p.cmd(&["outdated", "--deny", "stale"]).assert().success();
+}
+
+/// AC 26: a difference between a fixed revision and the current version is a notice; it does
+/// not fail `--deny stale`.
+#[test]
+fn fixed_revision_differences_do_not_deny() {
+    let p = Project::new();
+    p.pipeline();
+    p.cmd(&["update"]).assert().success();
+    let high = p.json(&["show", "high"])["pair"]["definition"]["state"]["content"]["snapshot"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    p.write(
+        "report.md.evid",
+        &format!(
+            "version = 2\nid = \"report\"\n\n[[claims]]\nid = \"findings\"\nselect = {{ heading = \"## Findings\" }}\nevidence = [{{ ref = \"high\", revision = \"{high}\" }}]\n"
+        ),
+    );
+    p.cmd(&["update", "--pin", "report"]).assert().success();
+    p.write("upstream.json", r#"[{"id":"CVE-4","severity":"high"}]"#);
+    p.cmd(&["update", "--force"]).assert().success();
+    p.cmd(&["outdated", "--deny", "stale"]).assert().success();
+    let why = p.stdout(&["why", "report"]);
+    assert!(why.contains("reference-current-diff"), "{why}");
+}
+
+/// AC 18: a process that stops during adoption leaves the old or the new set, never a mix;
+/// the next command that takes the lock completes or discards the adoption.
+#[test]
+fn interrupted_adoptions_recover() {
+    for (point, adopted) in [
+        ("before-commit", false),
+        ("after-first", true),
+        ("before-cleanup", true),
+    ] {
+        let p = Project::new();
+        p.pipeline();
+        p.cmd(&["update"]).assert().success();
+        let old_subject = read(&p, "raw.json");
+        p.write("upstream.json", r#"[{"id":"CVE-5","severity":"high"}]"#);
+        p.cmd(&["update", "--isolated", "raw"])
+            .env("EVIDENCE_TEST_CRASH_AT", point)
+            .assert()
+            .code(86);
+        if point != "before-commit" {
+            assert!(
+                p.stdout(&["status"]).contains("pending-commit"),
+                "{point}: read-only commands report the pending adoption"
+            );
+        }
+        // The next command that takes the lock recovers first (a pin runs nothing).
+        p.cmd(&["update", "--pin", "report"]).assert().success();
+        p.cmd(&["validate"]).assert().success();
+        let status = p.json(&["status", "raw"]);
+        let raw = &status["status"][0];
+        if adopted {
+            assert!(read(&p, "raw.json").contains("CVE-5"), "{point}");
+        } else {
+            assert_eq!(read(&p, "raw.json"), old_subject, "{point}");
+        }
+        assert_ne!(
+            raw["health"], "modified",
+            "{point}: subject and state agree"
+        );
+        assert!(
+            !p.dir.path().join(".evidence/journal").exists()
+                || std::fs::read_dir(p.dir.path().join(".evidence/journal"))
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "{point}: the journal is cleaned up"
+        );
+    }
+}
+
+/// MG 06 through the CLI: version 1 files are read-only until `evidence migrate`.
+#[test]
+fn migrate_is_explicit() {
+    let p = Project::new();
+    p.write("upstream.json", "[1]");
+    let v1 = "version = 1\nkind = \"source\"\nid = \"raw\"\n[source]\nrun = [\"cp\", \"upstream.json\", \"{output}\"]\n";
+    p.write("raw.json.evid", v1);
+    p.cmd(&["status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("legacy"));
+    p.cmd(&["update", "raw"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("evidence migrate"));
+    p.cmd(&["migrate", "--dry-run"]).assert().success();
+    assert_eq!(read(&p, "raw.json.evid"), v1);
+    p.cmd(&["migrate"]).assert().success();
+    assert!(read(&p, "raw.json.evid").contains("[[productions]]"));
+    p.cmd(&["update"]).assert().success();
+    assert_eq!(read(&p, "raw.json"), "[1]");
+
+    // A snapshot lifecycle without a recorded revision blocks (1) and leaves the file.
+    let blocked = "version = 1\nkind = \"authored\"\nid = \"notes\"\nlifecycle = \"snapshot\"\n[[claims]]\nid = \"c\"\nselect = { lines = \"1\" }\nevidence = [\"raw\"]\n";
+    p.write("notes.md", "x\n");
+    p.write("notes.md.evid", blocked);
+    p.cmd(&["migrate"]).assert().code(1);
+    assert_eq!(read(&p, "notes.md.evid"), blocked);
 }

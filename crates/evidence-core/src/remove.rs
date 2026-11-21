@@ -11,7 +11,7 @@ use crate::layout::Layout;
 use crate::workspace::{Pair, Workspace};
 
 /// Result of [`remove`].
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Removed {
     /// Evidence id.
     pub id: String,
@@ -24,7 +24,9 @@ pub struct Removed {
     pub kept_outside: Option<String>,
 }
 
-/// Removes a pair. Refuses when other evidence depends on it unless `force`. A parent
+/// Removes a pair. Refuses when other evidence uses its current version (an input or a
+/// claim reference without a fixed revision) unless `force`; references to fixed revisions
+/// keep working from the object store and do not block. A parent
 /// (`[members]`) is removed together with its members; a member its parent still lists is
 /// refused unless `force`, because the next update would bring it back.
 pub(crate) fn remove(
@@ -65,7 +67,7 @@ pub(crate) fn remove(
         .collect();
     let dependents: Vec<String> = group
         .iter()
-        .flat_map(|id| ws.dependents(id))
+        .flat_map(|id| ws.current_dependents(id))
         .map(|p| p.id.as_str())
         .filter(|id| !group.contains(id))
         .collect::<BTreeSet<_>>()
@@ -124,27 +126,13 @@ pub(crate) fn delete(
         .map_err(|e| Error::io(&pair.subject_path, e))?;
         files.push(pair.subject_rel.clone());
     }
-    history::append(
-        layout,
-        &pair.id,
-        &history::Event {
-            at: now.to_string(),
-            operation: "remove".into(),
-            status: "removed".into(),
-            snapshot: None,
-            previous: pair
-                .file
-                .state
-                .as_ref()
-                .and_then(|s| s.snapshot)
-                .map(|s| s.to_string()),
-            inputs: std::collections::BTreeMap::default(),
-            locator: std::collections::BTreeMap::new(),
-            claims: Vec::new(),
-            by: None,
-            message: None,
-            duration_ms: None,
-        },
-    )?;
+    let mut event = history::Event::new(now, "remove", "removed");
+    event.previous = pair
+        .file
+        .state
+        .as_ref()
+        .and_then(|s| s.content.as_ref())
+        .map(|c| c.snapshot.to_string());
+    history::append(layout, &pair.id, &event)?;
     Ok((files, kept_outside))
 }

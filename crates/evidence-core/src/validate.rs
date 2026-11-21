@@ -1,10 +1,10 @@
 //! Project-wide validation (`evidence validate`).
 
-use crate::format::{Action, Diagnostic, Kind, LocatorValue};
+use crate::format::{Action, ContentMode, Diagnostic, LocatorValue};
 
 use crate::exec::find_program;
 use crate::layout::{Layer, Layout};
-use crate::snapshot::current_snapshot;
+use crate::snapshot::Resolver;
 use crate::status::{ClaimHealth, evaluate_claims};
 use crate::subject_schema;
 use crate::workspace::{Pair, Workspace};
@@ -78,21 +78,19 @@ fn validate_config(layout: &Layout) -> Vec<Diagnostic> {
 fn validate_pair(ws: &Workspace, pair: &Pair, store: Option<&cas_fs::Store>) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let file = &pair.evid_rel;
-    for (action, ptr) in [
-        (&pair.file.source, "/source"),
-        (&pair.file.transform, "/transform"),
-        (&pair.file.generator, "/generator"),
-        (&pair.file.verify, "/verify"),
-    ] {
-        if let Some(action) = action {
-            for d in check_programs(pair, action) {
-                out.push(d.in_file(file).at_pointer(ptr));
-            }
+    for (i, production) in pair.file.productions.iter().enumerate() {
+        for d in check_programs(pair, &production.action()) {
+            out.push(d.in_file(file).at_pointer(format!("/productions/{i}")));
+        }
+    }
+    if let Some(verify) = &pair.file.verify {
+        for d in check_programs(pair, verify) {
+            out.push(d.in_file(file).at_pointer("/verify"));
         }
     }
 
     let exists = pair.subject_path.exists();
-    if !exists {
+    if !exists && pair.file.content_mode() == ContentMode::Editable {
         out.push(
             Diagnostic::warning(
                 "missing-subject",
@@ -123,39 +121,54 @@ fn validate_pair(ws: &Workspace, pair: &Pair, store: Option<&cas_fs::Store>) -> 
             }
         }
     }
-    if let (Some(store), Some(snapshot)) =
-        (store, pair.file.state.as_ref().and_then(|s| s.snapshot))
-        && !store.contains(&snapshot)
+    if let (Some(store), Some(snapshot)) = (
+        store,
+        pair.file
+            .state
+            .as_ref()
+            .and_then(|s| s.content.as_ref())
+            .map(|c| c.snapshot),
+    ) && !store.contains(&snapshot)
     {
         out.push(
             Diagnostic::warning(
                 "snapshot-missing",
-                format!("snapshot {} is not in the object store", snapshot.short()),
+                format!(
+                    "adopted version {} is not in the object store",
+                    snapshot.short()
+                ),
             )
             .in_file(file),
         );
     }
-    if pair.file.kind == Kind::Authored && exists {
-        for eval in evaluate_claims(ws, pair) {
-            if eval.status.health == ClaimHealth::Broken {
-                out.push(
-                    Diagnostic::error(
-                        "claim-broken",
-                        format!(
-                            "claim `{}`: {}",
-                            eval.status.id,
-                            eval.status.reasons.join("; ")
-                        ),
-                    )
-                    .in_file(file),
-                );
-            }
+    for eval in evaluate_claims(ws, pair) {
+        if eval.status.health == ClaimHealth::Broken {
+            out.push(
+                Diagnostic::error(
+                    "claim-broken",
+                    format!(
+                        "claim `{}`: {}",
+                        eval.status.id,
+                        eval.status
+                            .reasons
+                            .iter()
+                            .map(|r| r.message.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
+                )
+                .in_file(file),
+            );
         }
     }
-    for dep in ws.dependencies(&pair.id) {
-        if dep.file.kind != Kind::Authored
-            && current_snapshot(dep).is_none()
-            && pair.file.kind == Kind::Derived
+    for r in crate::status::generated_orphans(pair) {
+        out.push(Diagnostic::error("generated-orphaned", r.message).in_file(file));
+    }
+    let resolver = Resolver::new(ws);
+    for id in pair.file.input_ids() {
+        let Some(dep) = ws.get(id) else { continue };
+        if dep.file.content_mode() == ContentMode::Produced
+            && resolver.current_snapshot(dep).is_none()
         {
             out.push(
                 Diagnostic::warning(

@@ -1,0 +1,21 @@
+version = 1
+kind = "authored"
+id = "triage-2026-11-19"
+lifecycle = "snapshot"
+author = "human"
+
+[[claims]]
+id = "affected-services"
+select = { heading = "## Affected services" }
+evidence = ["service-map", "vulns-filtered"]
+
+[[claims]]
+id = "cve-reachability"
+select = { lines = "40-58" }
+evidence = [{ ref = "vulns-filtered", select = { json_pointer = "/findings/12" } }]
+note = "Reachable only through the internal API"
+
+[[claims]]
+id = "background"
+select = { heading = "## Background" }
+origin = "primary"

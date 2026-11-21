@@ -1,33 +1,47 @@
-//! `evidence update`: planning and executing runs with propagation.
+//! `evidence update`: planning and running productions, and adopting their results
+//! (`docs/semantics.md`, sections 6 and 8).
+//!
+//! Each run reads every input from the object store (an editable input is captured first),
+//! so the versions recorded are the versions the command saw (INV 08). A successful run is
+//! adopted in one journal transaction: the new subject, the run record, the generated claims,
+//! and the automatic pins of the claims it returned (INV 04), or nothing (D 05). A failed run
+//! records only the failed attempt; adopted content stays as it was.
 
-use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::format::{EvidenceFile, Kind, LastRun, RunStatus, document};
 use cas_fs::ObjectId;
 use jiff::Timestamp;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::exec::{self, RunContext, RunInput};
-use crate::history::{self, Event};
+use crate::fingerprint;
+use crate::format::{
+    Claim, ContentRecord, FINGERPRINT_VERSION, FailedAttempt, InputVersion, Output, PinRecord,
+    Production, Reference, RunRecord, RunStatus, document,
+};
+use crate::history::{self, Event, PinEvent};
+use crate::journal::{self, Transaction};
 use crate::layout::Layout;
 use crate::membership::{self, MemberAction, MemberChange};
-use crate::review;
-use crate::snapshot::{current_snapshot, disk_snapshot, snapshot_filter};
-use crate::status::status;
+use crate::pin::{self, PinSource};
+use crate::snapshot::{ResolveError, Resolver, Version, disk_snapshot, snapshot_filter};
+use crate::status::{member_changed, production_reasons};
 use crate::subject_schema;
-use crate::workspace::{Pair, Workspace};
+use crate::workspace::{Node, Pair, Workspace};
 
 /// Options of [`update`].
 #[derive(Debug, Clone, Default)]
 pub struct UpdateOptions {
-    /// Ids or paths to update. Empty means the whole project (due and stale pairs only).
+    /// Ids or paths to update. Empty means the whole project (only productions with a reason
+    /// to run).
     pub targets: Vec<String>,
-    /// Run every selected pair regardless of interval and freshness.
+    /// Run every selected production regardless of interval and freshness. Never moves a
+    /// fixed revision (INV 07).
     pub force: bool,
-    /// Do not re-run dependents outside the selection; only mark them stale.
+    /// Do not re-run dependents outside the selection; only report them.
     pub isolated: bool,
     /// Print the plan without running anything.
     pub dry_run: bool,
@@ -35,39 +49,126 @@ pub struct UpdateOptions {
     pub jobs: Option<usize>,
 }
 
-/// What happened to one pair.
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+/// A reason to run a production.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunReason {
+    /// Stable code: `requested`, `forced`, `due`, `never-run`, `production-changed`,
+    /// `production-unverified`, `input-changed`, `output-missing`, `modified`,
+    /// `member-changed`.
+    pub code: String,
+    /// Explanation.
+    pub message: String,
+}
+
+impl RunReason {
+    fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.to_owned(),
+            message: message.into(),
+        }
+    }
+}
+
+/// What a run did to the subject.
+#[derive(Debug, Clone, Serialize)]
+pub struct ContentChange {
+    /// Whether the adopted version changed.
+    pub changed: bool,
+    /// The adopted version after the run.
+    pub snapshot: String,
+    /// The adopted version before the run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous: Option<String>,
+}
+
+/// What a run did to its generated claims.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ClaimChanges {
+    /// Claims that did not exist before.
+    pub added: Vec<String>,
+    /// Claims whose definition changed.
+    pub updated: Vec<String>,
+    /// Claims no longer returned (deleted together with their pins).
+    pub removed: Vec<String>,
+    /// Claims returned unchanged.
+    pub unchanged: Vec<String>,
+}
+
+/// An input as a run used it.
+#[derive(Debug, Clone, Serialize)]
+pub struct InputUsed {
+    /// Input name.
+    pub name: String,
+    /// Evidence id.
+    pub id: String,
+    /// Snapshot read.
+    pub snapshot: String,
+    /// Hash of the selected part.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fragment: Option<String>,
+    /// The reference names a fixed revision.
+    pub fixed: bool,
+}
+
+/// What happened to one production.
+#[derive(Debug, Clone, Serialize)]
 pub struct RunReport {
     /// Evidence id.
     pub id: String,
-    /// Operation.
-    pub operation: Operation,
+    /// Production name.
+    pub production: String,
+    /// What the production writes.
+    pub writes: Vec<Output>,
     /// Why it ran.
-    pub reasons: Vec<String>,
+    pub reasons: Vec<RunReason>,
     /// Result (`None` in a dry run).
     pub status: Option<RunStatus>,
-    /// New snapshot.
+    /// Run id.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub snapshot: Option<String>,
-    /// Previous snapshot.
+    pub run: Option<String>,
+    /// Subject result (for productions that write the subject).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub previous: Option<String>,
-    /// Error or note.
+    pub content: Option<ContentChange>,
+    /// Claim results (for productions that write claims).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claims: Option<ClaimChanges>,
+    /// Claims pinned automatically (the claims the run returned).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pinned: Vec<String>,
+    /// Inputs as used.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<InputUsed>,
+    /// Error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     /// Duration.
     pub duration_ms: u64,
 }
 
+/// A selected pair that was not run, and why.
+#[derive(Debug, Clone, Serialize)]
+pub struct Skipped {
+    /// Evidence id.
+    pub id: String,
+    /// Stable code: `nothing-to-run`, `legacy-format`.
+    pub code: String,
+    /// Explanation.
+    pub message: String,
+}
+
 /// Result of [`update`].
-#[derive(Debug, Clone, Default, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct UpdateReport {
     /// Whether this was a dry run.
     pub dry_run: bool,
     /// Runs in execution order.
     pub runs: Vec<RunReport>,
-    /// Pairs downstream of a change that were not re-run (need review or an update).
+    /// Pairs whose current inputs or references changed in this update but that did not run
+    /// (their claims may need a new pin).
     pub affected: Vec<String>,
+    /// Selected pairs that were not run.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<Skipped>,
     /// Members of lists that were added, moved, or removed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<MemberChange>,
@@ -82,39 +183,16 @@ impl UpdateReport {
     }
 }
 
-/// What a run does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum Operation {
-    /// Runs `[source]`.
-    Fetch,
-    /// Runs `[transform]`.
-    Transform,
-    /// Runs `[generator]`.
-    Generate,
-}
-
-impl std::fmt::Display for Operation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Fetch => "fetch",
-            Self::Transform => "transform",
-            Self::Generate => "generate",
-        })
-    }
-}
-
-fn operation(kind: Kind) -> Operation {
-    match kind {
-        Kind::Source => Operation::Fetch,
-        Kind::Derived => Operation::Transform,
-        Kind::Authored => Operation::Generate,
-    }
-}
-
-fn runnable(pair: &Pair) -> bool {
-    pair.file.producer().is_some()
-}
+const RUN_CODES: &[&str] = &[
+    "due",
+    "never-run",
+    "production-changed",
+    "production-unverified",
+    "input-changed",
+    "output-missing",
+    "modified",
+    "member-changed",
+];
 
 /// Updates evidence. See [`UpdateOptions`] for selection and propagation rules.
 pub(crate) fn update(
@@ -126,126 +204,167 @@ pub(crate) fn update(
     let _lock = if opts.dry_run {
         None
     } else {
-        Some(layout.lock()?)
+        let lock = layout.lock()?;
+        journal::recover(layout)?;
+        Some(lock)
     };
     let mut ws = Workspace::load(layout)?;
     let mut report = UpdateReport {
         dry_run: opts.dry_run,
         ..UpdateReport::default()
     };
+    let explicit = !opts.targets.is_empty();
+    let selected: HashSet<String> = if explicit {
+        let pairs = ws.select(layout, cwd, &opts.targets)?;
+        if let Some(legacy) = pairs.iter().find(|p| p.legacy) {
+            return Err(Error::Legacy(legacy.evid_rel.clone()));
+        }
+        for p in pairs.iter().filter(|p| p.file.productions.is_empty()) {
+            report.skipped.push(Skipped {
+                id: p.id.clone(),
+                code: "nothing-to-run".into(),
+                message: format!(
+                    "nothing to run: `{}` has no productions (its subject is editable; pin its \
+                     claims with `evidence update --pin {}`)",
+                    p.id, p.id
+                ),
+            });
+        }
+        pairs.into_iter().map(|p| p.id.clone()).collect()
+    } else {
+        for p in ws.pairs().iter().filter(|p| p.legacy) {
+            report.skipped.push(Skipped {
+                id: p.id.clone(),
+                code: "legacy-format".into(),
+                message: format!(
+                    "{} is format version 1; run `evidence migrate` first",
+                    p.evid_rel
+                ),
+            });
+        }
+        ws.pairs().iter().map(|p| p.id.clone()).collect()
+    };
+
     // Lists may already be ahead of their members (a new `[members]`, a checkout).
     if !opts.dry_run {
         let parents: Vec<String> = ws
             .pairs()
             .iter()
-            .filter(|p| p.file.members.is_some())
+            .filter(|p| p.file.members.is_some() && !p.legacy)
             .map(|p| p.id.clone())
             .collect();
         if sync_members(layout, &ws, &parents, now, &mut report) {
             ws = Workspace::load(layout)?;
         }
     }
-    let mut levels = level_ids(&ws)?;
-    let explicit = !opts.targets.is_empty();
-    let selected: HashSet<String> = if explicit {
-        ws.select(layout, cwd, &opts.targets)?
-            .into_iter()
-            .map(|p| p.id.clone())
-            .collect()
-    } else {
-        ws.pairs().iter().map(|p| p.id.clone()).collect()
-    };
     let jobs = opts
         .jobs
         .or(layout.config().config.execution.jobs)
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get))
         .max(1);
 
-    let mut changed: HashSet<String> = HashSet::new();
-    let mut ran: HashSet<String> = HashSet::new();
-    let mut visited: HashSet<String> = HashSet::new();
-
-    // Levels are recomputed when members were added, so they run in the same update.
+    let mut levels = ws.run_levels()?;
+    let mut changed: HashSet<Node> = HashSet::new();
+    let mut ran: HashSet<Node> = HashSet::new();
+    let mut visited: HashSet<Node> = HashSet::new();
     let mut next = 0;
     while next < levels.len() {
-        let level: Vec<String> = levels[next]
+        let level: Vec<Node> = levels[next]
             .iter()
-            .filter(|id| !visited.contains(*id))
+            .filter(|n| !visited.contains(*n))
             .cloned()
             .collect();
         next += 1;
         visited.extend(level.iter().cloned());
-        let mut planned: Vec<(Pair, Vec<String>)> = Vec::new();
-        for id in level {
-            let Some(pair) = ws.get(&id) else { continue };
-            if !runnable(pair) {
+        let mut planned: Vec<(Node, Vec<RunReason>)> = Vec::new();
+        for node in level {
+            let Some(pair) = ws.get(&node.pair) else {
+                continue;
+            };
+            if pair.legacy {
                 continue;
             }
+            let Some(production) = pair.file.production(&node.production) else {
+                continue;
+            };
             let plan = Plan {
                 selected: &selected,
                 explicit,
                 changed: &changed,
                 ran: &ran,
             };
-            let reasons = decide(&ws, pair, &plan, opts, now);
+            let reasons = decide(&ws, &node, pair, production, &plan, opts, now);
             if reasons.is_empty() {
-                tracing::debug!(id = %pair.id, "up to date");
+                tracing::debug!(id = %pair.id, production = %production.name, "up to date");
             } else {
-                tracing::info!(id = %pair.id, reasons = %reasons.join("; "), "planned");
-                planned.push((pair.clone(), reasons));
+                tracing::info!(id = %pair.id, production = %production.name, "planned");
+                planned.push((node, reasons));
             }
         }
         if opts.dry_run {
-            for (pair, reasons) in planned {
-                changed.insert(pair.id.clone());
-                ran.insert(pair.id.clone());
+            for (node, reasons) in planned {
+                let writes = ws
+                    .get(&node.pair)
+                    .and_then(|p| p.file.production(&node.production))
+                    .map(|p| p.writes.clone())
+                    .unwrap_or_default();
                 report.runs.push(RunReport {
-                    id: pair.id.clone(),
-                    operation: operation(pair.file.kind),
+                    id: node.pair.clone(),
+                    production: node.production.clone(),
+                    writes,
                     reasons,
                     status: None,
-                    snapshot: None,
-                    previous: None,
+                    run: None,
+                    content: None,
+                    claims: None,
+                    pinned: Vec::new(),
+                    inputs: Vec::new(),
                     message: None,
                     duration_ms: 0,
                 });
+                changed.insert(node.clone());
+                ran.insert(node);
             }
             continue;
         }
         let results = run_level(layout, &ws, &planned, jobs, now);
         let mut lists = Vec::new();
-        for (run, new_file) in results {
-            ran.insert(run.id.clone());
+        for (node, reasons, result, started) in results {
+            let run = adopt(layout, &ws, &node, reasons, result, started, now);
+            ran.insert(node.clone());
             if run.status == Some(RunStatus::Changed) {
-                changed.insert(run.id.clone());
+                changed.insert(node.clone());
             }
+            let writes_subject = run.writes.contains(&Output::Subject);
             if run.status != Some(RunStatus::Failed)
-                && ws.get(&run.id).is_some_and(|p| p.file.members.is_some())
+                && writes_subject
+                && ws.get(&node.pair).is_some_and(|p| p.file.members.is_some())
             {
-                lists.push(run.id.clone());
-            }
-            if let Some(file) = new_file {
-                ws.replace_file(&run.id, file);
+                lists.push(node.pair.clone());
             }
             report.runs.push(run);
+            // Later levels see what this run adopted.
+            ws.reload_pair(&node.pair);
         }
         if sync_members(layout, &ws, &lists, now, &mut report) {
             ws = Workspace::load(layout)?;
-            levels = level_ids(&ws)?;
+            levels = ws.run_levels()?;
             next = 0;
         }
     }
 
-    report.affected = affected(&ws, &changed, &ran, now);
+    let ran_pairs: HashSet<String> = ran.iter().map(|n| n.pair.clone()).collect();
+    let changed_pairs: HashSet<String> = changed
+        .iter()
+        .filter(|n| {
+            ws.get(&n.pair)
+                .and_then(|p| p.file.production(&n.production))
+                .is_some_and(Production::writes_subject)
+        })
+        .map(|n| n.pair.clone())
+        .collect();
+    report.affected = affected(&ws, &changed_pairs, &ran_pairs);
     Ok(report)
-}
-
-fn level_ids(ws: &Workspace) -> Result<Vec<Vec<String>>> {
-    Ok(ws
-        .levels()?
-        .into_iter()
-        .map(|l| l.into_iter().map(|p| p.id.clone()).collect())
-        .collect())
 }
 
 /// Brings the members of `parents` in step with their lists. Returns whether any evidence
@@ -275,26 +394,19 @@ fn sync_members(
     touched
 }
 
-/// Pairs downstream of a change that did not run. A member reached only through its list
-/// counts only when its own entry changed.
-fn affected(
-    ws: &Workspace,
-    changed: &HashSet<String>,
-    ran: &HashSet<String>,
-    now: Timestamp,
-) -> Vec<String> {
-    let mut seen = std::collections::BTreeSet::new();
+/// Pairs whose current version of a changed subject matters, that did not run. A member
+/// reached only through its list counts only when its own entry changed.
+fn affected(ws: &Workspace, changed: &HashSet<String>, ran: &HashSet<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
     let mut stack: Vec<String> = changed.iter().cloned().collect();
     while let Some(id) = stack.pop() {
-        for dep in ws.dependents(&id) {
+        for dep in ws.current_dependents(&id) {
             let list_only = dep.membership.as_ref().is_some_and(|m| m.parent == id)
-                && !dep.file.dependencies().contains(&id.as_str());
-            if list_only
-                && !status(ws, dep, now)
-                    .reasons
+                && !dep
+                    .edges()
                     .iter()
-                    .any(|r| r.code == "member-changed")
-            {
+                    .any(|e| e.id == id && e.relation != crate::workspace::Relation::Member);
+            if list_only && !member_changed(dep) {
                 continue;
             }
             if seen.insert(dep.id.clone()) {
@@ -309,17 +421,19 @@ fn affected(
 struct Plan<'a> {
     selected: &'a HashSet<String>,
     explicit: bool,
-    changed: &'a HashSet<String>,
-    ran: &'a HashSet<String>,
+    changed: &'a HashSet<Node>,
+    ran: &'a HashSet<Node>,
 }
 
 fn decide(
     ws: &Workspace,
+    node: &Node,
     pair: &Pair,
+    production: &Production,
     plan: &Plan<'_>,
     opts: &UpdateOptions,
     now: Timestamp,
-) -> Vec<String> {
+) -> Vec<RunReason> {
     let named = plan.explicit && plan.selected.contains(&pair.id);
     // A member its list no longer has only runs when named.
     if pair
@@ -330,40 +444,35 @@ fn decide(
     {
         return Vec::new();
     }
-    let upstream: Vec<String> = pair
-        .file
-        .dependencies()
+    let upstream: Vec<RunReason> = ws
+        .node_dependencies(node)
         .into_iter()
-        .filter(|d| plan.changed.contains(*d))
-        .map(|d| format!("upstream `{d}` changed in this run"))
+        .filter(|d| plan.changed.contains(d))
+        .map(|d| {
+            if d.pair == pair.id {
+                RunReason::new("input-changed", "the subject changed in this run")
+            } else {
+                RunReason::new(
+                    "input-changed",
+                    format!("upstream `{}` changed in this run", d.pair),
+                )
+            }
+        })
         .collect();
-    let explicit = plan.explicit;
-    if !explicit || plan.selected.contains(&pair.id) {
+    if !plan.explicit || named {
         if opts.force {
-            return vec!["forced".into()];
+            return vec![RunReason::new("forced", "forced")];
         }
-        if explicit {
-            return vec!["requested".into()];
+        if named {
+            return vec![RunReason::new("requested", "requested")];
         }
         if !upstream.is_empty() {
             return upstream;
         }
-        let st = status(ws, pair, now);
-        return st
-            .reasons
-            .iter()
-            .filter(|r| {
-                matches!(
-                    r.code,
-                    "due"
-                        | "never-run"
-                        | "missing"
-                        | "input-changed"
-                        | "modified"
-                        | "member-changed"
-                )
-            })
-            .map(|r| r.message.clone())
+        return production_reasons(ws, pair, production, now)
+            .into_iter()
+            .filter(|r| RUN_CODES.contains(&r.code))
+            .map(|r| RunReason::new(r.code, r.message))
             .collect();
     }
     if opts.isolated {
@@ -371,57 +480,78 @@ fn decide(
     }
     let mut reasons = upstream;
     // Members of a list that ran: new entries and changed entries.
-    if pair
+    let parent_ran = pair
         .membership
         .as_ref()
-        .is_some_and(|m| plan.ran.contains(&m.parent))
-    {
+        .is_some_and(|m| plan.ran.iter().any(|n| n.pair == m.parent));
+    if parent_ran {
         reasons.extend(
-            status(ws, pair, now)
-                .reasons
+            production_reasons(ws, pair, production, now)
                 .into_iter()
-                .filter(|r| matches!(r.code, "never-run" | "member-changed" | "missing"))
-                .map(|r| r.message),
+                .filter(|r| matches!(r.code, "never-run" | "member-changed" | "output-missing"))
+                .map(|r| RunReason::new(r.code, r.message)),
         );
     }
     reasons
 }
 
+/// A run that finished successfully and waits to be adopted.
+struct Staged {
+    run: String,
+    tmp: PathBuf,
+    /// The new subject (in `tmp`) and its snapshot.
+    output: Option<(PathBuf, ObjectId)>,
+    inputs: BTreeMap<String, InputVersion>,
+    claims: Option<Vec<Claim>>,
+    pins: BTreeMap<String, PinRecord>,
+    locator: BTreeMap<String, String>,
+    /// The evidence file definition the run was planned from.
+    definition: Option<toml::Table>,
+}
+
+type Ran = (Node, Vec<RunReason>, Result<Staged, Failure>, Instant);
+
+/// A failed run: its id and why.
+struct Failure {
+    run: String,
+    message: String,
+    inputs: BTreeMap<String, InputVersion>,
+}
+
 fn run_level(
     layout: &Layout,
     ws: &Workspace,
-    planned: &[(Pair, Vec<String>)],
+    planned: &[(Node, Vec<RunReason>)],
     jobs: usize,
     now: Timestamp,
-) -> Vec<(RunReport, Option<EvidenceFile>)> {
+) -> Vec<Ran> {
     let mut out = Vec::new();
     for chunk in planned.chunks(jobs) {
-        let results: Vec<_> = std::thread::scope(|scope| {
+        let results: Vec<Ran> = std::thread::scope(|scope| {
             let handles: Vec<_> = chunk
                 .iter()
-                .map(|(pair, reasons)| {
-                    scope.spawn(move || execute(layout, ws, pair, reasons.clone(), now))
+                .map(|(node, _)| {
+                    scope.spawn(move || {
+                        let started = Instant::now();
+                        (execute(layout, ws, node, now), started)
+                    })
                 })
                 .collect();
             handles
                 .into_iter()
                 .zip(chunk)
-                .map(|(h, (pair, reasons))| {
-                    h.join().unwrap_or_else(|_| {
+                .map(|(h, (node, reasons))| {
+                    let (result, started) = h.join().unwrap_or_else(|_| {
                         (
-                            RunReport {
-                                id: pair.id.clone(),
-                                operation: operation(pair.file.kind),
-                                reasons: reasons.clone(),
-                                status: Some(RunStatus::Failed),
-                                snapshot: None,
-                                previous: None,
-                                message: Some("internal error: the run panicked".into()),
-                                duration_ms: 0,
-                            },
-                            None,
+                            Err(Failure {
+                                run: run_id(node, now),
+                                message: "internal error: the run panicked".into(),
+                                inputs: BTreeMap::new(),
+                            }),
+                            Instant::now(),
                         )
-                    })
+                    });
+                    (node.clone(), reasons.clone(), result, started)
                 })
                 .collect()
         });
@@ -430,401 +560,678 @@ fn run_level(
     out
 }
 
+fn run_id(node: &Node, now: Timestamp) -> String {
+    let seed = format!(
+        "{}\n{}\n{}\n{}",
+        node.pair,
+        node.production,
+        now.as_nanosecond(),
+        std::process::id()
+    );
+    let hex = ObjectId::of(seed.as_bytes()).to_hex();
+    format!("run-{}", &hex[..16])
+}
+
 fn execute(
     layout: &Layout,
     ws: &Workspace,
-    pair: &Pair,
-    reasons: Vec<String>,
+    node: &Node,
     now: Timestamp,
-) -> (RunReport, Option<EvidenceFile>) {
-    let started = Instant::now();
-    let op = operation(pair.file.kind);
-    let previous = pair.file.state.as_ref().and_then(|s| s.snapshot);
-    let tmp = layout.tmp_dir().join(format!(
-        "{}-{}-{}",
-        pair.id,
-        std::process::id(),
-        now.as_nanosecond()
-    ));
-    tracing::info!(id = %pair.id, operation = %op, "running");
-    let result = run_one(layout, ws, pair, &tmp);
-    let _ = std::fs::remove_dir_all(&tmp);
-    match &result {
-        Ok(done) => {
-            tracing::info!(id = %pair.id, status = ?done.status, elapsed_ms = started.elapsed().as_millis(), "finished");
-        }
-        Err(e) => tracing::warn!(id = %pair.id, error = %e, "failed"),
-    }
-    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-
-    let mut state = pair.file.state();
-    let (status, message, inputs, locator) = match &result {
-        Ok(done) => {
-            if done.status == RunStatus::Changed {
-                state.snapshot = Some(done.snapshot);
-                state.updated_at = Some(now);
-            }
-            state.checked_at = Some(now);
-            state.locator.clone_from(&done.locator);
-            state.inputs = done.inputs.clone();
-            if let Some(current) = pair.membership.as_ref().and_then(|m| m.current.clone()) {
-                state.member = Some(current);
-            }
-            state.last_run = Some(LastRun {
-                at: now,
-                status: done.status,
-                message: done.message.clone(),
-            });
-            (
-                done.status,
-                done.message.clone(),
-                done.inputs.clone(),
-                done.locator.clone(),
-            )
-        }
-        Err(e) => {
-            state.last_run = Some(LastRun {
-                at: now,
-                status: RunStatus::Failed,
-                message: Some(e.to_string()),
-            });
-            (
-                RunStatus::Failed,
-                Some(e.to_string()),
-                BTreeMap::new(),
-                BTreeMap::new(),
-            )
-        }
-    };
-
-    // Generators re-pin claims against the evidence they were run with.
-    let mut file = pair.file.clone();
-    let mut write_error = None;
-    if pair.file.kind == Kind::Authored && status == RunStatus::Changed {
-        // The agent may have edited the definition (e.g. claims); reload it first.
-        if let Some(reloaded) = document::read(&pair.evid_path).file {
-            file = reloaded;
-        }
-        let mut updated = pair.clone();
-        file.state = Some(state.clone());
-        updated.file = file.clone();
-        match review::pin(
-            layout,
-            ws,
-            &updated,
-            None,
-            Some(&format!(
-                "generator:{}",
-                pair.file.producer().map_or("?", |p| p.program())
-            )),
-            now,
-        ) {
-            Ok(pinned) => state = pinned.state,
-            Err(e) => write_error = Some(e.to_string()),
+) -> Result<Staged, Failure> {
+    let run = run_id(node, now);
+    let tmp = layout.tmp_dir().join(&run);
+    let mut inputs = BTreeMap::new();
+    tracing::info!(id = %node.pair, production = %node.production, run = %run, "running");
+    let result = stage(layout, ws, node, &run, &tmp, &mut inputs);
+    match result {
+        Ok(staged) => Ok(staged),
+        Err(message) => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            tracing::warn!(id = %node.pair, production = %node.production, error = %message, "failed");
+            Err(Failure {
+                run,
+                message,
+                inputs,
+            })
         }
     }
-    file.state = Some(state.clone());
-    if let Err(e) = document::write_state(&pair.evid_path, &state) {
-        write_error = Some(e.to_string());
-    }
-    let _ = history::append(
-        layout,
-        &pair.id,
-        &Event {
-            at: now.to_string(),
-            operation: op.to_string(),
-            status: status.to_string(),
-            snapshot: state.snapshot.map(|s| s.to_string()),
-            previous: previous.map(|s| s.to_string()),
-            inputs: inputs
-                .into_iter()
-                .map(|(k, v)| (k, v.to_string()))
-                .collect(),
-            locator,
-            claims: Vec::new(),
-            by: None,
-            message: message.clone(),
-            duration_ms: Some(duration_ms),
-        },
-    );
-    let report = RunReport {
-        id: pair.id.clone(),
-        operation: op,
-        reasons,
-        status: Some(if write_error.is_some() {
-            RunStatus::Failed
-        } else {
-            status
-        }),
-        snapshot: state.snapshot.map(|s| s.to_string()),
-        previous: previous.map(|s| s.to_string()),
-        message: write_error.or(message),
-        duration_ms,
-    };
-    (report, Some(file))
 }
 
-struct Done {
-    status: RunStatus,
-    snapshot: ObjectId,
-    locator: BTreeMap<String, String>,
-    inputs: BTreeMap<String, ObjectId>,
-    message: Option<String>,
-}
-
-fn run_one(layout: &Layout, ws: &Workspace, pair: &Pair, tmp: &Path) -> Result<Done> {
-    let action = pair
-        .file
-        .producer()
-        .ok_or_else(|| Error::Invalid(format!("`{}` has nothing to run", pair.id)))?;
-    std::fs::create_dir_all(tmp).map_err(|e| Error::io(tmp, e))?;
-    let work = tmp.join("out");
-    std::fs::create_dir_all(&work).map_err(|e| Error::io(&work, e))?;
-    let file_name = pair
-        .subject_path
+fn file_name(pair: &Pair) -> std::ffi::OsString {
+    pair.subject_path
         .file_name()
-        .map_or_else(|| "subject".into(), std::ffi::OsStr::to_os_string);
-    let output = work.join(file_name);
+        .map_or_else(|| "subject".into(), std::ffi::OsStr::to_os_string)
+}
 
-    // Inputs: declared inputs, plus claim references for generators.
-    let mut inputs = Vec::new();
-    let mut used = BTreeMap::new();
-    let mut names: Vec<(String, String)> = pair
+/// Runs one production in `tmp` and checks everything it returned. Nothing outside `tmp`
+/// and the object store is changed.
+#[allow(clippy::too_many_lines)]
+fn stage(
+    layout: &Layout,
+    ws: &Workspace,
+    node: &Node,
+    run: &str,
+    tmp: &Path,
+    used: &mut BTreeMap<String, InputVersion>,
+) -> Result<Staged, String> {
+    let pair = ws
+        .get(&node.pair)
+        .ok_or_else(|| format!("unknown evidence `{}`", node.pair))?;
+    let production = pair
         .file
-        .inputs
-        .iter()
-        .map(|i| (i.id().to_owned(), i.name().to_owned()))
-        .collect();
-    if pair.file.kind == Kind::Authored {
-        for dep in pair.file.dependencies() {
-            if !names.iter().any(|(id, _)| id == dep) {
-                names.push((dep.to_owned(), dep.to_owned()));
-            }
-        }
-    }
-    for (id, input_name) in names {
-        let dep = ws
-            .get(&id)
-            .ok_or_else(|| Error::Invalid(format!("unknown input `{id}`")))?;
-        let snapshot = current_snapshot(dep).ok_or_else(|| {
-            Error::Invalid(format!("input `{id}` has no snapshot yet; update it first"))
-        })?;
-        used.insert(id.clone(), snapshot);
-        inputs.push(RunInput {
-            id,
-            name: input_name,
-            path: dep.subject_path.clone(),
+        .production(&node.production)
+        .ok_or_else(|| format!("`{}` has no production `{}`", pair.id, node.production))?;
+    let resolver = Resolver::new(ws);
+    let store = ws.store();
+    let io = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+    std::fs::create_dir_all(tmp.join("out")).map_err(|e| io(tmp, e))?;
+    let definition = std::fs::read_to_string(&pair.evid_path)
+        .ok()
+        .and_then(|t| document::definition_in(&t));
+
+    // Inputs: the version each reference resolves to, stored, then materialized from the
+    // store (INV 03, INV 08).
+    let mut run_inputs = Vec::new();
+    let mut versions: BTreeMap<String, ObjectId> = BTreeMap::new();
+    for input in &production.inputs {
+        let name = input.name().to_owned();
+        let version = resolver
+            .version_of(input)
+            .map_err(|e| format!("input `{name}`: {e}"))?;
+        let snapshot = resolver
+            .keep(&version)
+            .map_err(|e| format!("input `{name}`: {e}"))?;
+        let stored = Version::Stored(snapshot);
+        let fragment = resolver
+            .fragment(&stored, input.path(), input.selector())
+            .map_err(|e| format!("input `{name}`: {e}"))?;
+        let target_name = ws.get(input.id()).map_or_else(|| "input".into(), file_name);
+        let dir = tmp.join("inputs").join(&name);
+        std::fs::create_dir_all(&dir).map_err(|e| io(&dir, e))?;
+        let path = dir.join(target_name);
+        store
+            .materialize(&snapshot, &path)
+            .map_err(|e| format!("input `{name}`: {e}"))?;
+        let path = match input.path() {
+            Some(inner) => path.join(inner),
+            None => path,
+        };
+        used.insert(
+            name.clone(),
+            InputVersion {
+                id: input.id().to_owned(),
+                snapshot,
+                fragment,
+                fixed: input.is_fixed(),
+            },
+        );
+        versions.insert(name.clone(), snapshot);
+        run_inputs.push(RunInput {
+            id: input.id().to_owned(),
+            name,
+            path,
             snapshot: snapshot.to_string(),
+            fixed: input.is_fixed(),
         });
     }
 
+    // The current version of the subject, materialized for `{subject}`.
+    let subject_dir = tmp.join("subject");
+    std::fs::create_dir_all(&subject_dir).map_err(|e| io(&subject_dir, e))?;
+    let subject_copy = subject_dir.join(file_name(pair));
+    let current = match resolver.current(pair) {
+        Ok(v) => {
+            let id = resolver.keep(&v).map_err(|e| format!("subject: {e}"))?;
+            store
+                .materialize(&id, &subject_copy)
+                .map_err(|e| format!("subject: {e}"))?;
+            Some(id)
+        }
+        Err(ResolveError::NeverProduced(_) | ResolveError::SubjectMissing(_)) => None,
+        Err(e) => return Err(format!("subject: {e}")),
+    };
+
     let state = pair.file.state();
     let cache = layout.cache_dir(&pair.id);
-    std::fs::create_dir_all(&cache).map_err(|e| Error::io(&cache, e))?;
+    std::fs::create_dir_all(&cache).map_err(|e| io(&cache, e))?;
+    let output = tmp.join("out").join(file_name(pair));
+    let claims_path = tmp.join("claims.json");
     let ctx = RunContext {
         id: pair.id.clone(),
         root: layout.root().to_path_buf(),
         dir: pair.evid_dir().to_path_buf(),
-        subject: pair.subject_path.clone(),
+        subject: subject_copy,
         output: output.clone(),
+        claims: claims_path.clone(),
         cache,
         context_file: tmp.join("context.json"),
-        inputs,
+        inputs: run_inputs,
     };
-    write_context(&ctx, pair, &state)?;
+    write_context(&ctx, pair, production, run, current, &state)?;
     let timeout = layout.config().config.execution.timeout.map(|t| t.0);
-    exec::run_action(&ctx, action, true, timeout).map_err(Error::Invalid)?;
-    if !output.exists() {
-        return Err(Error::Invalid(format!(
-            "`{}` succeeded but did not write {{output}} (use `stdout = true` to capture its output)",
-            action.program()
-        )));
-    }
-
-    if let Some(schema) = &pair.file.schema {
-        let problems = subject_schema::validate(pair.evid_dir(), schema, &output, pair.file.format);
-        if !problems.is_empty() {
-            return Err(Error::Invalid(format!(
-                "output does not match schema {}: {}",
-                schema.json_schema,
-                problems.join("; ")
-            )));
-        }
-    } else if let Err(problem) = subject_schema::well_formed(&output, Some(pair.format())) {
-        return Err(Error::Invalid(format!(
-            "output is not well-formed: {problem}"
-        )));
-    }
-    if let Some(verify) = &pair.file.verify {
-        exec::run_action(&ctx, verify, false, timeout)
-            .map_err(|e| Error::Invalid(format!("verification failed: {e}")))?;
-    }
-    let locator = exec::locator(&ctx, action, timeout).map_err(Error::Invalid)?;
-
-    let store = layout.store()?;
-    let snapshot = store.put_path_filtered(&output, &snapshot_filter)?;
-    let on_disk = disk_snapshot(&pair.subject_path);
-    let status = if Some(snapshot) == state.snapshot && on_disk == Some(snapshot) {
-        RunStatus::Unchanged
+    let action = production.action();
+    let stdout_to = if production.writes_subject() {
+        &output
     } else {
-        place(&output, &pair.subject_path, tmp)?;
-        if Some(snapshot) == state.snapshot {
-            RunStatus::Unchanged
-        } else {
-            RunStatus::Changed
-        }
+        &claims_path
     };
-    Ok(Done {
-        status,
-        snapshot,
+    exec::run_action(&ctx, &action, Some(stdout_to), timeout)?;
+
+    let mut new_subject = None;
+    if production.writes_subject() {
+        if !output.exists() {
+            return Err(format!(
+                "`{}` succeeded but did not write {{output}} (use `stdout = true` to capture its output)",
+                production.program()
+            ));
+        }
+        if let Some(schema) = &pair.file.schema {
+            let problems =
+                subject_schema::validate(pair.evid_dir(), schema, &output, pair.file.format);
+            if !problems.is_empty() {
+                return Err(format!(
+                    "output does not match schema {}: {}",
+                    schema.json_schema,
+                    problems.join("; ")
+                ));
+            }
+        } else if let Err(problem) = subject_schema::well_formed(&output, Some(pair.format())) {
+            return Err(format!("output is not well-formed: {problem}"));
+        }
+        if let Some(verify) = &pair.file.verify {
+            exec::run_action(&ctx, verify, None, timeout)
+                .map_err(|e| format!("verification failed: {e}"))?;
+        }
+        let id = store
+            .put_path_filtered(&output, &snapshot_filter)
+            .map_err(|e| e.to_string())?;
+        new_subject = Some((output.clone(), id));
+    }
+    let locator = exec::locator(&ctx, &action, timeout)?;
+
+    let mut claims = None;
+    let mut pins = BTreeMap::new();
+    if production.writes_claims() {
+        let subject = new_subject
+            .as_ref()
+            .map(|(_, id)| *id)
+            .or(current)
+            .ok_or_else(|| "claims need a subject, and it does not exist".to_owned())?;
+        let returned = read_claims(&claims_path, production)?;
+        check_claims(pair, production, &returned)?;
+        let subject_version = Version::Stored(subject);
+        let text = resolver
+            .text(&subject_version, None)
+            .map_err(|e| format!("claims: subject: {e}"))?;
+        let by = format!("production:{}", production.name);
+        let source = PinSource {
+            at: Timestamp::now(),
+            by: Some(&by),
+            run: Some(run),
+        };
+        let mut problems = Vec::new();
+        for claim in &returned {
+            let version_of = |r: &Reference| -> std::result::Result<Version, ResolveError> {
+                if r.is_fixed() {
+                    return resolver.version_of(r);
+                }
+                if r.id() == pair.id {
+                    return Ok(subject_version.clone());
+                }
+                production
+                    .inputs
+                    .iter()
+                    .find(|i| i.id() == r.id() && !i.is_fixed())
+                    .and_then(|i| versions.get(i.name()))
+                    .map(|v| Version::Stored(*v))
+                    .ok_or_else(|| ResolveError::UnknownEvidence(r.id().to_owned()))
+            };
+            match pin::build(
+                &resolver,
+                claim,
+                &subject_version,
+                &text,
+                &version_of,
+                &source,
+            ) {
+                Ok(record) => {
+                    pins.insert(claim.id.clone(), record);
+                }
+                Err(e) => problems.push(format!("claim `{}`: {}", claim.id, e.join("; "))),
+            }
+        }
+        if !problems.is_empty() {
+            return Err(format!(
+                "claims contract violated (nothing adopted): {}",
+                problems.join("; ")
+            ));
+        }
+        claims = Some(returned);
+    }
+    Ok(Staged {
+        run: run.to_owned(),
+        tmp: tmp.to_path_buf(),
+        output: new_subject,
+        inputs: used.clone(),
+        claims,
+        pins,
         locator,
-        inputs: used,
-        message: None,
+        definition,
     })
 }
 
-/// Writes the `{context}` file: what a command (e.g. an AI agent) needs to know about the run.
-fn write_context(ctx: &RunContext, pair: &Pair, state: &crate::format::State) -> Result<()> {
+/// The JSON a claims-writing production returns.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaimsOutput {
+    claims: Vec<Claim>,
+}
+
+fn read_claims(path: &Path, production: &Production) -> Result<Vec<Claim>, String> {
+    let text = std::fs::read_to_string(path).map_err(|_| {
+        format!(
+            "`{}` succeeded but did not write {{claims}} (an empty set is `{{\"claims\": []}}`)",
+            production.program()
+        )
+    })?;
+    let parsed: ClaimsOutput = serde_json::from_str(&text)
+        .map_err(|e| format!("claims contract violated: {{claims}} is not valid: {e}"))?;
+    Ok(parsed.claims)
+}
+
+/// The generated claims contract (`docs/semantics.md`, section 9): ids in the namespace,
+/// unique, not colliding with other claims; references to the subject itself, to inputs of
+/// this production, or to fixed revisions only.
+fn check_claims(pair: &Pair, production: &Production, claims: &[Claim]) -> Result<(), String> {
+    let mut problems = Vec::new();
+    let mut seen = HashSet::new();
+    let state = pair.file.state();
+    for claim in claims {
+        if !production.owns(&claim.id) {
+            problems.push(format!(
+                "`{}` is outside the namespace `{}`",
+                claim.id,
+                production.namespace.as_deref().unwrap_or_default()
+            ));
+        }
+        if !seen.insert(claim.id.as_str()) {
+            problems.push(format!("`{}` is returned twice", claim.id));
+        }
+        if pair.file.claims.iter().any(|c| c.id == claim.id)
+            || state
+                .generated
+                .iter()
+                .any(|(p, cs)| *p != production.name && cs.iter().any(|c| c.id == claim.id))
+        {
+            problems.push(format!("`{}` collides with another claim", claim.id));
+        }
+        if claim.evidence.is_empty() {
+            problems.push(format!("`{}` has no evidence", claim.id));
+        }
+        for r in &claim.evidence {
+            if r.detail().alias.is_some() {
+                problems.push(format!("`{}`: `as` is only for inputs", claim.id));
+            }
+            let allowed = r.is_fixed()
+                || r.id() == pair.id
+                || production
+                    .inputs
+                    .iter()
+                    .any(|i| i.id() == r.id() && !i.is_fixed());
+            if !allowed {
+                problems.push(format!(
+                    "`{}` references `{}`, which is neither the subject, an input of `{}`, nor a \
+                     fixed revision (input-contract)",
+                    claim.id,
+                    r.key(),
+                    production.name
+                ));
+            }
+            if r.is_fixed() && r.revision().is_none() {
+                problems.push(format!(
+                    "`{}`: a fixed reference needs an explicit revision",
+                    claim.id
+                ));
+            }
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "claims contract violated (nothing adopted): {}",
+            problems.join("; ")
+        ))
+    }
+}
+
+/// Adopts a staged run, or records a failed attempt, and reports it.
+fn adopt(
+    layout: &Layout,
+    ws: &Workspace,
+    node: &Node,
+    reasons: Vec<RunReason>,
+    result: Result<Staged, Failure>,
+    started: Instant,
+    now: Timestamp,
+) -> RunReport {
+    let pair = ws.get(&node.pair);
+    let writes = pair
+        .and_then(|p| p.file.production(&node.production))
+        .map(|p| p.writes.clone())
+        .unwrap_or_default();
+    let mut report = RunReport {
+        id: node.pair.clone(),
+        production: node.production.clone(),
+        writes,
+        reasons,
+        status: Some(RunStatus::Failed),
+        run: None,
+        content: None,
+        claims: None,
+        pinned: Vec::new(),
+        inputs: Vec::new(),
+        message: None,
+        duration_ms: 0,
+    };
+    let Some(pair) = pair else {
+        report.message = Some("the evidence disappeared during the run".into());
+        return report;
+    };
+    let finished = match result {
+        Ok(staged) => {
+            report.run = Some(staged.run.clone());
+            report.inputs = inputs_used(&staged.inputs);
+            let tmp = staged.tmp.clone();
+            let adopted = adopt_staged(layout, pair, node, &staged, now, &mut report);
+            let _ = std::fs::remove_dir_all(&tmp);
+            adopted
+        }
+        Err(failure) => {
+            report.run = Some(failure.run.clone());
+            report.inputs = inputs_used(&failure.inputs);
+            Err(failure.message)
+        }
+    };
+    report.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match finished {
+        Ok(status) => report.status = Some(status),
+        Err(message) => {
+            report.status = Some(RunStatus::Failed);
+            report.content = None;
+            report.claims = None;
+            report.pinned.clear();
+            if let Err(e) = record_failure(pair, node, report.run.as_deref(), &message, now) {
+                tracing::warn!(id = %pair.id, error = %e, "recording a failed attempt");
+            }
+            report.message = Some(message);
+        }
+    }
+    let mut event = Event::new(now, "run", report.status.map_or("failed", |s| s.as_str()));
+    event.production = Some(node.production.clone());
+    event.run.clone_from(&report.run);
+    event.snapshot = report.content.as_ref().map(|c| c.snapshot.clone());
+    event.previous = report.content.as_ref().and_then(|c| c.previous.clone());
+    event.inputs = report
+        .inputs
+        .iter()
+        .map(|i| (i.name.clone(), i.snapshot.clone()))
+        .collect();
+    event.claims.clone_from(&report.pinned);
+    event.message.clone_from(&report.message);
+    event.duration_ms = Some(report.duration_ms);
+    if report.status != Some(RunStatus::Failed)
+        && let Some(state) = std::fs::read_to_string(&pair.evid_path)
+            .ok()
+            .and_then(|t| document::state_in(&t).ok())
+    {
+        event.locator = state
+            .runs
+            .get(&node.production)
+            .map(|r| r.locator.clone())
+            .unwrap_or_default();
+        event.pins = report
+            .pinned
+            .iter()
+            .filter_map(|c| state.pins.get(c).map(|p| PinEvent::of(c, p)))
+            .collect();
+    }
+    let _ = history::append(layout, &pair.id, &event);
+    report
+}
+
+fn inputs_used(inputs: &BTreeMap<String, InputVersion>) -> Vec<InputUsed> {
+    inputs
+        .iter()
+        .map(|(name, v)| InputUsed {
+            name: name.clone(),
+            id: v.id.clone(),
+            snapshot: v.snapshot.to_string(),
+            fragment: v.fragment.map(|f| f.to_string()),
+            fixed: v.fixed,
+        })
+        .collect()
+}
+
+fn adopt_staged(
+    layout: &Layout,
+    pair: &Pair,
+    node: &Node,
+    staged: &Staged,
+    now: Timestamp,
+    report: &mut RunReport,
+) -> Result<RunStatus, String> {
+    let text =
+        std::fs::read_to_string(&pair.evid_path).map_err(|e| format!("{}: {e}", pair.evid_rel))?;
+    if document::definition_in(&text) != staged.definition {
+        return Err(format!(
+            "{} changed during the run; nothing was adopted",
+            pair.evid_rel
+        ));
+    }
+    let production = pair
+        .file
+        .production(&node.production)
+        .ok_or("the production disappeared during the run")?;
+    let mut state = document::state_in(&text).map_err(|e| format!("{}: {e}", pair.evid_rel))?;
+    let mut changed = false;
+
+    let mut tx = Transaction::begin(layout, "run").map_err(|e| e.to_string())?;
+    if let Some((output, snapshot)) = &staged.output {
+        let previous = state.content.as_ref().map(|c| c.snapshot);
+        let content_changed = previous != Some(*snapshot);
+        changed |= content_changed;
+        if disk_snapshot(&pair.subject_path) != Some(*snapshot) {
+            tx.stage_path(&pair.subject_path, output)
+                .map_err(|e| e.to_string())?;
+        }
+        state.content = Some(ContentRecord {
+            snapshot: *snapshot,
+            updated_at: if content_changed {
+                now
+            } else {
+                state.content.as_ref().map_or(now, |c| c.updated_at)
+            },
+            production: Some(production.name.clone()),
+            run: Some(staged.run.clone()),
+        });
+        report.content = Some(ContentChange {
+            changed: content_changed,
+            snapshot: snapshot.to_string(),
+            previous: previous.map(|p| p.to_string()),
+        });
+    }
+    if let Some(claims) = &staged.claims {
+        let old = state.generated.remove(&production.name).unwrap_or_default();
+        let mut changes = ClaimChanges::default();
+        for c in claims {
+            match old.iter().find(|o| o.id == c.id) {
+                None => changes.added.push(c.id.clone()),
+                Some(o) if fingerprint::claim(o) != fingerprint::claim(c) => {
+                    changes.updated.push(c.id.clone());
+                }
+                Some(_) => changes.unchanged.push(c.id.clone()),
+            }
+        }
+        for o in &old {
+            if !claims.iter().any(|c| c.id == o.id) {
+                changes.removed.push(o.id.clone());
+                state.pins.remove(&o.id);
+            }
+        }
+        changed |=
+            !changes.added.is_empty() || !changes.updated.is_empty() || !changes.removed.is_empty();
+        for (id, record) in &staged.pins {
+            state.pins.insert(id.clone(), record.clone());
+        }
+        report.pinned = staged.pins.keys().cloned().collect();
+        if !claims.is_empty() {
+            state
+                .generated
+                .insert(production.name.clone(), claims.clone());
+        }
+        report.claims = Some(changes);
+    }
+    state.runs.insert(
+        production.name.clone(),
+        RunRecord {
+            run: Some(staged.run.clone()),
+            at: now,
+            fingerprint: Some(fingerprint::production(
+                &pair.file,
+                pair.evid_dir(),
+                production,
+            )),
+            fingerprint_version: Some(FINGERPRINT_VERSION),
+            subject: staged.output.as_ref().map(|(_, s)| *s),
+            inputs: staged.inputs.clone(),
+            claims: staged
+                .claims
+                .as_ref()
+                .map(|cs| cs.iter().map(|c| c.id.clone()).collect()),
+            namespace: production.namespace.clone(),
+            locator: staged.locator.clone(),
+            legacy: false,
+        },
+    );
+    state.failures.remove(&production.name);
+    if let Some(current) = pair.membership.as_ref().and_then(|m| m.current.clone()) {
+        state.member = Some(current);
+    }
+    let new_text =
+        document::replace_state(&text, &state).map_err(|e| format!("{}: {e}", pair.evid_rel))?;
+    tx.stage_bytes(&pair.evid_path, new_text.as_bytes())
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(if changed {
+        RunStatus::Changed
+    } else {
+        RunStatus::Unchanged
+    })
+}
+
+/// Records a failed attempt. Adopted content, run records, claims, and pins stay as they were.
+fn record_failure(
+    pair: &Pair,
+    node: &Node,
+    run: Option<&str>,
+    message: &str,
+    now: Timestamp,
+) -> Result<()> {
+    let text =
+        std::fs::read_to_string(&pair.evid_path).map_err(|e| Error::io(&pair.evid_path, e))?;
+    let mut state = document::state_in(&text).map_err(Error::Invalid)?;
+    state.failures.insert(
+        node.production.clone(),
+        FailedAttempt {
+            at: now,
+            run: run.map(str::to_owned),
+            message: message.to_owned(),
+        },
+    );
+    let new_text = document::replace_state(&text, &state).map_err(Error::Invalid)?;
+    document::atomic_write(&pair.evid_path, new_text.as_bytes())?;
+    Ok(())
+}
+
+/// Writes the `{context}` file (version 2): what a command (e.g. an AI agent) needs to know
+/// about the run.
+fn write_context(
+    ctx: &RunContext,
+    pair: &Pair,
+    production: &Production,
+    run: &str,
+    current: Option<ObjectId>,
+    state: &crate::format::State,
+) -> Result<(), String> {
     #[derive(Serialize)]
     struct Previous<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         snapshot: Option<String>,
-        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-        locator: &'a BTreeMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        locator: Option<&'a BTreeMap<String, String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        claims: Option<&'a Vec<Claim>>,
     }
     #[derive(Serialize)]
     struct ContextFile<'a> {
         version: u32,
         id: &'a str,
-        kind: Kind,
+        run: &'a str,
+        production: &'a str,
+        writes: &'a [Output],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        namespace: Option<&'a str>,
+        content: crate::format::ContentMode,
         #[serde(skip_serializing_if = "Option::is_none")]
         title: Option<&'a str>,
         subject: &'a Path,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subject_snapshot: Option<String>,
         evidence_file: &'a Path,
         output: &'a Path,
+        claims: &'a Path,
         inputs: &'a [RunInput],
         previous: Previous<'a>,
     }
     let file = ContextFile {
-        version: 1,
+        version: 2,
         id: &pair.id,
-        kind: pair.file.kind,
+        run,
+        production: &production.name,
+        writes: &production.writes,
+        namespace: production.namespace.as_deref(),
+        content: pair.file.content_mode(),
         title: pair.file.title.as_deref(),
         subject: &ctx.subject,
+        subject_snapshot: current.map(|c| c.to_string()),
         evidence_file: &pair.evid_path,
         output: &ctx.output,
+        claims: &ctx.claims,
         inputs: &ctx.inputs,
         previous: Previous {
-            snapshot: state.snapshot.map(|s| s.to_string()),
-            locator: &state.locator,
+            snapshot: state.content.as_ref().map(|c| c.snapshot.to_string()),
+            locator: state.runs.get(&production.name).map(|r| &r.locator),
+            claims: state.generated.get(&production.name),
         },
     };
-    let text = serde_json::to_string_pretty(&file).map_err(|e| Error::Invalid(e.to_string()))?;
-    std::fs::write(&ctx.context_file, text).map_err(|e| Error::io(&ctx.context_file, e))
-}
-
-/// Atomically replaces `subject` with `output` (a file or directory in `tmp`).
-fn place(output: &Path, subject: &Path, tmp: &Path) -> Result<()> {
-    if let Some(parent) = subject.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
-    }
-    if output.is_dir() {
-        let backup = tmp.join(".previous");
-        let had_old = subject.exists();
-        if had_old {
-            move_path(subject, &backup)?;
-        }
-        if let Err(e) = move_path(output, subject) {
-            if had_old {
-                let _ = move_path(&backup, subject);
-            }
-            return Err(e);
-        }
-        if had_old {
-            let _ = std::fs::remove_dir_all(&backup);
-        }
-        Ok(())
-    } else {
-        if subject.is_dir() {
-            std::fs::remove_dir_all(subject).map_err(|e| Error::io(subject, e))?;
-        }
-        move_path(output, subject)
-    }
-}
-
-/// Renames `from` to `to`. When they are on different file systems (a subject outside the
-/// project), `from` is first copied next to `to`, so the final step is still an atomic rename.
-fn move_path(from: &Path, to: &Path) -> Result<()> {
-    match std::fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
-            let parent = to.parent().unwrap_or(Path::new("."));
-            let staging = tempfile::Builder::new()
-                .prefix(".evidence-")
-                .tempdir_in(parent)
-                .map_err(|e| Error::io(parent, e))?;
-            let staged = staging.path().join("subject");
-            copy_tree(from, &staged)?;
-            std::fs::rename(&staged, to).map_err(|e| Error::io(to, e))?;
-            let removed = if from.is_dir() {
-                std::fs::remove_dir_all(from)
-            } else {
-                std::fs::remove_file(from)
-            };
-            removed.map_err(|e| Error::io(from, e))
-        }
-        Err(e) => Err(Error::io(to, e)),
-    }
-}
-
-/// Copies a file or a directory tree (symlinks are copied as symlinks on Unix).
-fn copy_tree(from: &Path, to: &Path) -> Result<()> {
-    let meta = std::fs::symlink_metadata(from).map_err(|e| Error::io(from, e))?;
-    #[cfg(unix)]
-    if meta.file_type().is_symlink() {
-        let target = std::fs::read_link(from).map_err(|e| Error::io(from, e))?;
-        return std::os::unix::fs::symlink(target, to).map_err(|e| Error::io(to, e));
-    }
-    if meta.is_dir() {
-        std::fs::create_dir_all(to).map_err(|e| Error::io(to, e))?;
-        for entry in std::fs::read_dir(from).map_err(|e| Error::io(from, e))? {
-            let entry = entry.map_err(|e| Error::io(from, e))?;
-            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
-        }
-        Ok(())
-    } else {
-        std::fs::copy(from, to)
-            .map(|_| ())
-            .map_err(|e| Error::io(to, e))
-    }
+    let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
+    std::fs::write(&ctx.context_file, text)
+        .map_err(|e| format!("{}: {e}", ctx.context_file.display()))
 }
 
 impl Workspace {
-    pub(crate) fn replace_file(&mut self, id: &str, file: EvidenceFile) {
+    /// Re-reads one pair's evidence file (after an adoption changed its state).
+    pub(crate) fn reload_pair(&mut self, id: &str) {
+        let Some(pair) = self.get(id) else { return };
+        let Ok(text) = std::fs::read_to_string(&pair.evid_path) else {
+            return;
+        };
+        let Ok(state) = document::state_in(&text) else {
+            return;
+        };
         if let Some(pair) = self.get_mut(id) {
-            pair.file = file;
+            pair.file.state = (!state.is_empty()).then_some(state);
         }
-    }
-}
-
-#[cfg(test)]
-#[cfg(unix)]
-mod place_tests {
-    use super::*;
-
-    #[test]
-    fn copy_tree_copies_files_directories_and_symlinks() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src");
-        std::fs::create_dir_all(src.join("sub")).unwrap();
-        std::fs::write(src.join("sub/a.txt"), "a").unwrap();
-        std::os::unix::fs::symlink("sub/a.txt", src.join("link")).unwrap();
-        let dst = dir.path().join("dst");
-        copy_tree(&src, &dst).unwrap();
-        assert_eq!(std::fs::read_to_string(dst.join("sub/a.txt")).unwrap(), "a");
-        assert_eq!(
-            std::fs::read_link(dst.join("link")).unwrap(),
-            Path::new("sub/a.txt")
-        );
     }
 }

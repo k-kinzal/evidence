@@ -38,18 +38,11 @@ fn write_project(n: usize, edges: &[(usize, usize)]) -> (tempfile::TempDir, Layo
             .filter(|(a, _)| *a == i)
             .map(|(_, b)| format!("\"{}\"", id(n, *b)))
             .collect();
-        let text = if deps.is_empty() {
-            format!(
-                "version = 1\nkind = \"source\"\nid = \"{}\"\n[source]\nrun = [\"true\"]\n",
-                id(n, i)
-            )
-        } else {
-            format!(
-                "version = 1\nkind = \"derived\"\nid = \"{}\"\ninputs = [{}]\n[transform]\nrun = [\"true\"]\n",
-                id(n, i),
-                deps.join(", ")
-            )
-        };
+        let text = format!(
+            "version = 2\nid = \"{}\"\n[[productions]]\nname = \"make\"\nwrites = [\"subject\"]\nrun = [\"true\"]\ninputs = [{}]\n",
+            id(n, i),
+            deps.join(", ")
+        );
         std::fs::write(dir.path().join(format!("{}.json.evid", id(n, i))), text).unwrap();
     }
     (dir, project)
@@ -78,24 +71,16 @@ proptest! {
         let ws = Workspace::load(&project).unwrap();
         prop_assert!(ws.diagnostics.is_empty(), "{:?}", ws.diagnostics);
 
-        let order: HashMap<String, usize> = ws
-            .topological_order()
-            .unwrap()
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.id.clone(), i))
-            .collect();
-        prop_assert_eq!(order.len(), n);
         let level: HashMap<String, usize> = ws
-            .levels()
+            .run_levels()
             .unwrap()
             .iter()
             .enumerate()
-            .flat_map(|(l, ps)| ps.iter().map(move |p| (p.id.clone(), l)))
+            .flat_map(|(l, ns)| ns.iter().map(move |node| (node.pair.clone(), l)))
             .collect();
+        prop_assert_eq!(level.len(), n);
         for (a, b) in &edges {
             let (a, b) = (id(n, *a), id(n, *b));
-            prop_assert!(order[&b] < order[&a], "{b} must come before {a}");
             prop_assert!(level[&b] < level[&a], "{b} must be on a lower level than {a}");
         }
         for i in 0..n {
@@ -113,6 +98,6 @@ proptest! {
         let (_dir, project) = write_project(n, &with_cycle);
         let ws = Workspace::load(&project).unwrap();
         prop_assert!(ws.diagnostics.iter().any(|d| d.code == "cycle"), "{:?}", ws.diagnostics);
-        prop_assert!(ws.topological_order().is_err());
+        prop_assert!(ws.run_levels().is_err());
     }
 }

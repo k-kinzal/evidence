@@ -2,6 +2,6 @@
 source: crates/evidence-cli/tests/cli.rs
 expression: redact(&out)
 ---
-changed   fetch     raw sha256:[id]  never produced; run `evidence update`
-changed   transform high sha256:[id]  upstream `raw` changed in this run
-Affected (review or update): report
+changed   raw/fetch  subject changed sha256:[id]  never run; run `evidence update`
+changed   high/transform  subject changed sha256:[id]  upstream `raw` changed in this run
+Affected (claims may need `evidence update --pin`): report

@@ -3,7 +3,8 @@
 //! This crate is everything the `evidence` CLI and the `evidence-ui` desktop app do, behind
 //! one entry point, [`Project`]. Open a project once; then ask it ([`Project::statuses`],
 //! [`Project::coverage`], [`Project::tree`], [`Project::search`], …) or change it
-//! ([`Project::update`], [`Project::review`], [`Project::add`], [`Project::remove`]).
+//! ([`Project::update`], [`Project::pin`], [`Project::migrate`], [`Project::add`],
+//! [`Project::remove`]).
 //!
 //! ```no_run
 //! # fn main() -> evidence_core::Result<()> {
@@ -17,8 +18,9 @@
 //! # let _ = report; Ok(()) }
 //! ```
 //!
-//! Evidence runs the commands written in evidence files (`[source]`, `[transform]`,
-//! `[generator]`, `[verify]`) and has no built-in knowledge of any data source. Everything
+//! Evidence runs the commands written in evidence files (`[[productions]]`, `[verify]`) and
+//! has no built-in knowledge of any data source. The meaning of every record is in
+//! `docs/semantics.md`. Everything
 //! works from the files alone: evidence files, the object store, and history files. With the
 //! `index` feature, an SQLite index makes search faster; nothing depends on it.
 //!
@@ -30,6 +32,7 @@ mod add;
 mod coverage;
 mod error;
 mod exec;
+mod fingerprint;
 pub mod format;
 mod graph;
 #[cfg(test)]
@@ -37,12 +40,14 @@ mod graph_props;
 mod history;
 #[cfg(feature = "index")]
 mod index;
+mod journal;
 mod layout;
 mod membership;
+mod migrate;
 mod output;
+mod pin;
 mod project;
 mod remove;
-mod review;
 mod search;
 mod snapshot;
 mod status;
@@ -52,21 +57,31 @@ mod update;
 mod validate;
 mod workspace;
 
-pub use add::AddOptions;
-pub use coverage::{CoverageCounts, CoverageReport, CoverageSegment, LineStatus};
+pub use add::{AddOptions, Template};
+pub use coverage::{
+    CoverageCounts, CoverageReport, CoverageSegment, LineStatus, RequirementCoverage,
+    RequirementState, RequirementStatus, SatisfyingClaim,
+};
 pub use error::{Error, Result};
 pub use graph::TreeNode;
-pub use history::Event;
+pub use history::{Event, PinEvent};
 pub use layout::{Layer, LoadedConfig};
 pub use membership::{MemberAction, MemberChange};
-pub use output::{JSON_VERSION, PairView, output_schemas};
+pub use migrate::{MigrateAction, MigrateIssue, MigrateOptions, MigrateReport, MigratedFile};
+pub use output::{JSON_VERSION, PairView};
+pub use pin::{PairPins, PinFailure, PinOptions, PinReport, PinnedClaim, PinnedVersion};
 pub use project::{DirEntry, IndexStats, Object, Project, Pruned, StoreCheck};
 pub use remove::Removed;
-pub use review::{Pinned, ReviewOptions};
 pub use search::Hit;
-pub use status::{ClaimHealth, ClaimStatus, Health, PairStatus, Reason};
-pub use update::{Operation, RunReport, UpdateOptions, UpdateReport};
-pub use workspace::{Membership, Pair};
+pub use status::{
+    ClaimHealth, ClaimReason, ClaimStatus, Health, Notice, PairStatus, ProductionStatus, Reason,
+    ReferenceStatus,
+};
+pub use update::{
+    ClaimChanges, ContentChange, InputUsed, RunReason, RunReport, Skipped, UpdateOptions,
+    UpdateReport,
+};
+pub use workspace::{Edge, Membership, Pair, Relation};
 
 /// The examples in README.md are compiled and run as doctests.
 #[cfg(doctest)]

@@ -1,8 +1,5 @@
-version = 1
-kind = "authored"
+version = 2
 id = "triage-2026-11-19"
-lifecycle = "snapshot"
-author = "human"
 
 [[claims]]
 id = "affected-services"
@@ -12,10 +9,8 @@ evidence = ["service-map", "vulns-filtered"]
 [[claims]]
 id = "cve-reachability"
 select = { lines = "40-58" }
-evidence = [{ ref = "vulns-filtered", select = { json_pointer = "/findings/12" } }]
+evidence = [{ ref = "vulns-filtered", select = { json_pointer = "/findings/12" }, revision = "sha256:1111111111111111111111111111111111111111111111111111111111111111" }]
 note = "Reachable only through the internal API"
 
-[[claims]]
-id = "background"
+[[primary]]
 select = { heading = "## Background" }
-origin = "primary"

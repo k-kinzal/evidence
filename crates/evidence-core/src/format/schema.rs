@@ -5,6 +5,9 @@ use crate::format::evid::EvidenceFile;
 
 /// `$id` of the evidence file schema.
 pub(super) const EVID_SCHEMA_ID: &str = "https://evidence-cli.github.io/schemas/evid.schema.json";
+/// `$id` of the version 1 evidence file schema (validation of version 1 files only).
+pub(super) const EVID_V1_SCHEMA_ID: &str =
+    "https://evidence-cli.github.io/schemas/evid-v1.schema.json";
 /// `$id` of the configuration schema.
 pub(super) const CONFIG_SCHEMA_ID: &str =
     "https://evidence-cli.github.io/schemas/config.schema.json";
@@ -30,7 +33,7 @@ pub fn evid_schema() -> serde_json::Value {
             the template for this member only.",
         "required": ["version", "member_of", "member"],
         "properties": {
-            "version": { "description": "Format version. Must be `1`.", "const": 1 },
+            "version": { "description": "Format version. Must be `2` (`1` before migration).", "enum": [1, 2] },
             "member_of": {
                 "description": "Id of the parent evidence, whose subject is the list.",
                 "type": "string",
@@ -43,7 +46,6 @@ pub fn evid_schema() -> serde_json::Value {
             },
             "state": { "$ref": "#/$defs/State" },
             "id": false,
-            "kind": false,
             "subject": false,
             "members": false
         }
@@ -60,10 +62,12 @@ pub fn evid_schema() -> serde_json::Value {
 
 /// Schema of a complete definition only (what members are composed into).
 pub(crate) fn definition_schema() -> serde_json::Value {
-    with_id(
-        generator().into_root_schema_for::<EvidenceFile>(),
-        EVID_SCHEMA_ID,
-    )
+    schema_of::<EvidenceFile>(EVID_SCHEMA_ID)
+}
+
+/// Schema of `T` with `$id`.
+pub(crate) fn schema_of<T: schemars::JsonSchema>(id: &str) -> serde_json::Value {
+    with_id(generator().into_root_schema_for::<T>(), id)
 }
 
 /// JSON Schema of configuration files (`config.toml`).

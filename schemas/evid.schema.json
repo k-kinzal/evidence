@@ -2,7 +2,7 @@
   "$defs": {
     "Action": {
       "additionalProperties": false,
-      "description": "A command (`[source]`, `[transform]`, `[generator]`, `[verify]`).\n\nEvidence runs commands; it has no built-in knowledge of any data source. Anything that can\nbe fetched or computed by a program (`curl`, `git`, `bq`, `jq`, an SBOM tool, an AI agent)\ncan be evidence. The program runs without a shell; placeholders such as `{output}` and\n`{input.NAME}` are expanded in `run`, `env`, `cwd`, and `locator` (see `docs/format.md`).",
+      "description": "A command: `[verify]`, and the command part of a production.",
       "properties": {
         "cwd": {
           "description": "Working directory, relative to the evidence file. Defaults to its directory.",
@@ -15,19 +15,15 @@
           "description": "Extra environment variables for the program.",
           "type": "object"
         },
-        "interval": {
-          "$ref": "#/$defs/Interval",
-          "description": "`[source]` only: minimum time between refreshes by `evidence update` (e.g. `6h`,\n`1d`). Without an interval the source is refreshed only explicitly."
-        },
         "locator": {
           "additionalProperties": {
             "$ref": "#/$defs/LocatorValue"
           },
-          "description": "Where the content came from, recorded in the state after each successful run: a fixed\nvalue (placeholders expanded) or a command whose trimmed standard output is the value,\ne.g. `commit = [\"git\", \"-C\", \"{output}\", \"rev-parse\", \"HEAD\"]`.",
+          "description": "Locator entries (not allowed in `[verify]`).",
           "type": "object"
         },
         "run": {
-          "description": "Program and arguments, e.g. `[\"curl\", \"-sSfo\", \"{output}\", \"https://…\"]`.",
+          "description": "Program and arguments.",
           "items": {
             "type": "string"
           },
@@ -35,11 +31,11 @@
           "type": "array"
         },
         "stdin": {
-          "description": "File fed to the program's standard input (relative to the evidence file), e.g. a SQL\nquery or an AI prompt.",
+          "description": "File fed to the program's standard input (relative to the evidence file).",
           "type": "string"
         },
         "stdout": {
-          "description": "Write the program's standard output to `{output}` (instead of the program writing it).",
+          "description": "Write the program's standard output to the main output.",
           "type": "boolean"
         },
         "timeout": {
@@ -54,13 +50,14 @@
     },
     "Claim": {
       "additionalProperties": false,
-      "description": "A claim: a range of the subject and the evidence it is based on.",
+      "description": "A claim: a range of the subject and the references it relates to.",
       "properties": {
         "evidence": {
-          "description": "Evidence backing the range. Empty only when `origin = \"primary\"`.",
+          "description": "References the range relates to (at least one).",
           "items": {
-            "$ref": "#/$defs/EvidenceRef"
+            "$ref": "#/$defs/Reference"
           },
+          "minItems": 1,
           "type": "array"
         },
         "id": {
@@ -69,55 +66,45 @@
           "type": "string"
         },
         "note": {
-          "description": "Free-form note (reasoning, caveats).",
+          "description": "Free-form note (reasoning, caveats). Part of the definition.",
           "type": "string"
-        },
-        "origin": {
-          "$ref": "#/$defs/Origin",
-          "description": "Declares the range as primary information."
         },
         "select": {
           "$ref": "#/$defs/Selector",
-          "description": "The range of the subject this claim covers."
+          "description": "The range of the subject this claim is about."
         }
       },
       "required": [
         "id",
-        "select"
+        "select",
+        "evidence"
       ],
       "type": "object"
     },
-    "ClaimState": {
+    "ContentRecord": {
       "additionalProperties": false,
-      "description": "Pins of one claim.",
+      "description": "The adopted version of a produced subject.",
       "properties": {
-        "anchor": {
-          "description": "The claimed text at review time, used to re-anchor the claim after edits\n(only kept for short ranges).",
+        "production": {
+          "description": "The production that wrote it.",
           "type": "string"
         },
-        "content": {
+        "run": {
+          "description": "The run that wrote it.",
+          "type": "string"
+        },
+        "snapshot": {
           "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Hash of the claimed range of the subject at review time."
+          "description": "Snapshot of the adopted content."
         },
-        "evidence": {
-          "description": "Pinned evidence.",
-          "items": {
-            "$ref": "#/$defs/Pin"
-          },
-          "type": "array"
-        },
-        "reviewed_at": {
+        "updated_at": {
           "$ref": "#/$defs/TimestampSchema",
-          "description": "When the claim was last reviewed."
-        },
-        "reviewed_by": {
-          "description": "Who reviewed it.",
-          "type": "string"
+          "description": "When the adopted content last changed."
         }
       },
       "required": [
-        "reviewed_at",
-        "content"
+        "snapshot",
+        "updated_at"
       ],
       "type": "object"
     },
@@ -125,11 +112,11 @@
       "additionalProperties": false,
       "properties": {
         "author": {
-          "description": "Who wrote an authored subject: `human`, `ai:<agent>`, a name, …",
+          "description": "Who writes the subject, e.g. `human` or `ai:claude`. Descriptive only: it changes\nnothing about how the subject is updated or pinned.",
           "type": "string"
         },
         "claims": {
-          "description": "`authored`: ranges of the subject and the evidence they are based on.",
+          "description": "Hand-written claims: ranges of the subject and the references they relate to.",
           "items": {
             "$ref": "#/$defs/Claim"
           },
@@ -143,45 +130,39 @@
           "$ref": "#/$defs/Format",
           "description": "Subject format. Inferred from the subject's extension when omitted."
         },
-        "generator": {
-          "$ref": "#/$defs/Action",
-          "description": "`authored`: optional command (e.g. an AI agent) that regenerates the subject."
-        },
         "id": {
           "description": "Stable identifier, unique within the project.",
           "pattern": "^[a-z0-9][a-z0-9._-]*$",
           "type": "string"
         },
-        "inputs": {
-          "description": "`derived` (and `authored` generators): other evidence this subject is computed from.",
-          "items": {
-            "$ref": "#/$defs/InputRef"
-          },
-          "type": "array"
-        },
-        "kind": {
-          "$ref": "#/$defs/Kind",
-          "description": "What produces the subject."
-        },
-        "lifecycle": {
-          "$ref": "#/$defs/Lifecycle",
-          "description": "How the subject relates to upstream change. Defaults to `living`."
-        },
         "members": {
           "$ref": "#/$defs/Members",
           "description": "Makes the subject a list (a JSON array or JSONL) whose entries are kept as member\npairs, each generated from a template and updated on its own."
         },
-        "origin": {
-          "$ref": "#/$defs/Origin",
-          "description": "`authored`: declares the whole subject as primary information (no upstream evidence)."
+        "primary": {
+          "description": "Ranges of the subject declared as primary information (no evidence required).",
+          "items": {
+            "$ref": "#/$defs/Primary"
+          },
+          "type": "array"
+        },
+        "productions": {
+          "description": "Commands that produce the subject and/or claims. Without a production that writes\nthe subject, the subject is edited directly (editable).",
+          "items": {
+            "$ref": "#/$defs/Production"
+          },
+          "type": "array"
+        },
+        "requirements": {
+          "description": "Requirements this subject defines (for requirement coverage).",
+          "items": {
+            "$ref": "#/$defs/Requirement"
+          },
+          "type": "array"
         },
         "schema": {
           "$ref": "#/$defs/SchemaSpec",
-          "description": "Schema the subject must conform to."
-        },
-        "source": {
-          "$ref": "#/$defs/Action",
-          "description": "`source`: the command that acquires the subject."
+          "description": "Schema every new version of the subject must conform to."
         },
         "state": {
           "$ref": "#/$defs/State",
@@ -203,16 +184,12 @@
           "description": "Short human-readable title.",
           "type": "string"
         },
-        "transform": {
-          "$ref": "#/$defs/Action",
-          "description": "`derived`: how the subject is computed from its inputs."
-        },
         "verify": {
           "$ref": "#/$defs/Action",
-          "description": "Optional check run on every new version of the subject before it is accepted."
+          "description": "Optional check run on every new version of the subject before it is adopted."
         },
         "version": {
-          "description": "Format version. Must be `1`.",
+          "description": "Format version. Must be `2` (version 1 files are migrated with `evidence migrate`).",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -220,45 +197,32 @@
       },
       "required": [
         "version",
-        "kind",
         "id"
       ],
       "type": "object"
     },
-    "EvidenceDetail": {
+    "FailedAttempt": {
       "additionalProperties": false,
-      "description": "Detailed evidence reference.",
+      "description": "A failed attempt of a production.",
       "properties": {
-        "path": {
-          "description": "For directory subjects: path of the file inside the directory.",
+        "at": {
+          "$ref": "#/$defs/TimestampSchema",
+          "description": "When the attempt finished."
+        },
+        "message": {
+          "description": "What went wrong.",
           "type": "string"
         },
-        "ref": {
-          "description": "Evidence id.",
+        "run": {
+          "description": "Run id.",
           "type": "string"
-        },
-        "select": {
-          "$ref": "#/$defs/Selector",
-          "description": "Part of the referenced subject; the claim only becomes stale when this part changes."
         }
       },
       "required": [
-        "ref"
+        "at",
+        "message"
       ],
       "type": "object"
-    },
-    "EvidenceRef": {
-      "anyOf": [
-        {
-          "description": "Evidence id (the whole subject).",
-          "type": "string"
-        },
-        {
-          "$ref": "#/$defs/EvidenceDetail",
-          "description": "Evidence id and a selector into its subject."
-        }
-      ],
-      "description": "A reference from a claim to evidence, optionally to a part of it."
     },
     "Format": {
       "description": "Subject format.",
@@ -300,99 +264,37 @@
         }
       ]
     },
-    "InputDetail": {
+    "InputVersion": {
       "additionalProperties": false,
-      "description": "Detailed input reference.",
+      "description": "The version of an input used by a run.",
       "properties": {
-        "as": {
-          "description": "Name used in placeholders (`{input.<name>}`); defaults to the id.",
-          "type": "string"
+        "fixed": {
+          "description": "The input names a fixed revision.",
+          "type": "boolean"
         },
-        "ref": {
+        "fragment": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "Hash of the selected part, when the input selects one."
+        },
+        "id": {
           "description": "Evidence id.",
           "type": "string"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "Snapshot used."
         }
       },
       "required": [
-        "ref"
+        "id",
+        "snapshot"
       ],
       "type": "object"
-    },
-    "InputRef": {
-      "anyOf": [
-        {
-          "description": "Evidence id.",
-          "type": "string"
-        },
-        {
-          "$ref": "#/$defs/InputDetail",
-          "description": "Evidence id with options."
-        }
-      ],
-      "description": "A dependency on another evidence (`inputs`)."
     },
     "Interval": {
       "description": "Duration such as `30m`, `6h`, `1d`, `2weeks`.",
       "pattern": "^\\s*[0-9]+\\s*[a-zA-Z]+(\\s*[0-9]+\\s*[a-zA-Z]+)*\\s*$",
       "type": "string"
-    },
-    "Kind": {
-      "description": "Evidence kind.",
-      "oneOf": [
-        {
-          "const": "source",
-          "description": "Primary information acquired automatically by a command.",
-          "type": "string"
-        },
-        {
-          "const": "derived",
-          "description": "Deterministically computed from other evidence.",
-          "type": "string"
-        },
-        {
-          "const": "authored",
-          "description": "Written by a human or an AI.",
-          "type": "string"
-        }
-      ]
-    },
-    "LastRun": {
-      "additionalProperties": false,
-      "description": "Result of a run.",
-      "properties": {
-        "at": {
-          "$ref": "#/$defs/TimestampSchema",
-          "description": "When the run finished."
-        },
-        "message": {
-          "description": "Error or informational message.",
-          "type": "string"
-        },
-        "status": {
-          "$ref": "#/$defs/RunStatus",
-          "description": "Result."
-        }
-      },
-      "required": [
-        "at",
-        "status"
-      ],
-      "type": "object"
-    },
-    "Lifecycle": {
-      "description": "How a subject relates to upstream change.",
-      "oneOf": [
-        {
-          "const": "snapshot",
-          "description": "One-off artifact pinned to the evidence it was written against; never becomes stale\nbecause of upstream change.",
-          "type": "string"
-        },
-        {
-          "const": "living",
-          "description": "Must track upstream; becomes stale when referenced evidence changes.",
-          "type": "string"
-        }
-      ]
     },
     "LineRange": {
       "anyOf": [
@@ -427,7 +329,6 @@
       "description": "A member of a list. Its definition is composed from the parent's `[members]` template and the list entry; any other evidence file field overrides the template for this member only.",
       "properties": {
         "id": false,
-        "kind": false,
         "member": {
           "description": "Key of this member's entry in the parent's list.",
           "minLength": 1,
@@ -444,8 +345,11 @@
         },
         "subject": false,
         "version": {
-          "const": 1,
-          "description": "Format version. Must be `1`."
+          "description": "Format version. Must be `2` (`1` before migration).",
+          "enum": [
+            1,
+            2
+          ]
         }
       },
       "required": [
@@ -500,7 +404,7 @@
         "template": {
           "additionalProperties": true,
           "default": {},
-          "description": "Definition shared by every member: any evidence file field except `version`, `id`,\n`subject`, `members`, and `state`. `kind` defaults to `source`. Strings may use\n`{member.FIELD}` (a top-level text, number, or boolean field of the entry).",
+          "description": "Definition shared by every member: any evidence file field except `version`, `id`,\n`subject`, `members`, and `state`. Strings may use `{member.FIELD}` (a top-level text,\nnumber, or boolean field of the entry).",
           "type": "object"
         }
       },
@@ -526,31 +430,106 @@
         }
       ]
     },
-    "Origin": {
-      "description": "Declares content as primary information.",
+    "Output": {
+      "description": "What a production writes.",
       "oneOf": [
         {
-          "const": "primary",
-          "description": "Primary information: intentionally not backed by other evidence.",
+          "const": "subject",
+          "description": "The subject (`{output}`).",
+          "type": "string"
+        },
+        {
+          "const": "claims",
+          "description": "The complete set of claims of the production's namespace (`{claims}`).",
           "type": "string"
         }
       ]
     },
-    "Pin": {
+    "PinRecord": {
       "additionalProperties": false,
-      "description": "One pinned evidence reference.",
+      "description": "The pin of a claim: the versions it was confirmed against.",
+      "properties": {
+        "anchor": {
+          "description": "The claimed text, as a hint for re-anchoring suggestions (short ranges only).",
+          "type": "string"
+        },
+        "content": {
+          "$ref": "#/$defs/PinnedContent",
+          "description": "The subject version and the hash of the claimed range."
+        },
+        "definition": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "Fingerprint of the normalized claim definition (absent for migrated pins)."
+        },
+        "evidence": {
+          "description": "The version of each reference.",
+          "items": {
+            "$ref": "#/$defs/PinnedReference"
+          },
+          "type": "array"
+        },
+        "fingerprint_version": {
+          "description": "Version of the fingerprint algorithm.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "legacy": {
+          "description": "Migrated from format version 1: needs a new pin.",
+          "type": "boolean"
+        },
+        "recorded_at": {
+          "$ref": "#/$defs/TimestampSchema",
+          "description": "When the pin was recorded."
+        },
+        "recorded_by": {
+          "description": "Who recorded it (a person, or the production for automatic pins).",
+          "type": "string"
+        },
+        "run": {
+          "description": "The run that recorded it (automatic pins).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "recorded_at",
+        "content"
+      ],
+      "type": "object"
+    },
+    "PinnedContent": {
+      "additionalProperties": false,
+      "description": "The subject side of a pin.",
       "properties": {
         "fragment": {
           "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Hash of the selected fragment at pin time (when the reference has a selector or path)."
+          "description": "Hash of the claimed range."
+        },
+        "snapshot": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "Snapshot of the subject (absent for some migrated pins)."
+        }
+      },
+      "required": [
+        "fragment"
+      ],
+      "type": "object"
+    },
+    "PinnedReference": {
+      "additionalProperties": false,
+      "description": "One pinned reference.",
+      "properties": {
+        "fragment": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "Hash of the selected part (when the reference has a selector or path)."
         },
         "key": {
-          "description": "Reference key (`id`, `id:path`, `id#selector`).",
+          "description": "Reference key (`id`, `id:path`, `id#selector`, `…@revision`).",
           "type": "string"
         },
         "snapshot": {
           "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Snapshot of the referenced subject at pin time."
+          "description": "Snapshot of the referenced subject."
         }
       },
       "required": [
@@ -559,25 +538,235 @@
       ],
       "type": "object"
     },
-    "RunStatus": {
-      "description": "Result of a run.",
-      "oneOf": [
-        {
-          "const": "changed",
-          "description": "A new snapshot was accepted.",
+    "Primary": {
+      "additionalProperties": false,
+      "description": "A range declared as primary information (`[[primary]]`).",
+      "properties": {
+        "note": {
+          "description": "Free-form note.",
           "type": "string"
         },
-        {
-          "const": "unchanged",
-          "description": "The run succeeded and the content did not change.",
-          "type": "string"
-        },
-        {
-          "const": "failed",
-          "description": "The run, schema validation, or verification failed; the previous snapshot was kept.",
-          "type": "string"
+        "select": {
+          "$ref": "#/$defs/Selector",
+          "description": "The range (`{ whole = true }` for the whole subject)."
         }
-      ]
+      },
+      "required": [
+        "select"
+      ],
+      "type": "object"
+    },
+    "Production": {
+      "additionalProperties": false,
+      "description": "A production: a command that writes the subject, claims, or both (`[[productions]]`).\n\nEvidence runs commands; it has no built-in knowledge of any data source. The program runs\nwithout a shell; placeholders such as `{output}`, `{claims}`, and `{input.NAME}` are\nexpanded in `run`, `env`, `cwd`, `stdin`, and `locator` (see `docs/format-v2.md`).",
+      "properties": {
+        "cwd": {
+          "description": "Working directory, relative to the evidence file. Defaults to its directory.",
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Extra environment variables for the program.",
+          "type": "object"
+        },
+        "inputs": {
+          "description": "Evidence the command reads. A change of an input's selected content is a reason to\nre-run the production.",
+          "items": {
+            "$ref": "#/$defs/Reference"
+          },
+          "type": "array"
+        },
+        "interval": {
+          "$ref": "#/$defs/Interval",
+          "description": "Minimum time between runs by a plain `evidence update`. Without it, the production\nruns only when something changed or when requested."
+        },
+        "locator": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LocatorValue"
+          },
+          "description": "Where the content came from, recorded after each successful run: a fixed value\n(placeholders expanded) or a command whose trimmed standard output is the value.",
+          "type": "object"
+        },
+        "name": {
+          "description": "Stable name, unique within the file. Records are kept per name.",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Claim namespace (required when `writes` has `claims`): the production owns every\nclaim id starting with `<namespace>.`.",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*(\\.[A-Za-z0-9][A-Za-z0-9_-]*)*$",
+          "type": "string"
+        },
+        "run": {
+          "description": "Program and arguments, e.g. `[\"curl\", \"-sSfo\", \"{output}\", \"https://…\"]`.",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "stdin": {
+          "description": "File fed to the program's standard input (relative to the evidence file).",
+          "type": "string"
+        },
+        "stdout": {
+          "description": "Write the program's standard output to the main output: `{output}` when the\nproduction writes the subject, else `{claims}`.",
+          "type": "boolean"
+        },
+        "timeout": {
+          "$ref": "#/$defs/Interval",
+          "description": "Kill the program after this long (default: `execution.timeout` from the config)."
+        },
+        "writes": {
+          "description": "What the production writes: `[\"subject\"]`, `[\"claims\"]`, or both.",
+          "items": {
+            "$ref": "#/$defs/Output"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "writes",
+        "run"
+      ],
+      "type": "object"
+    },
+    "Reference": {
+      "anyOf": [
+        {
+          "description": "Evidence id (the whole subject, current version).",
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/ReferenceDetail",
+          "description": "Evidence id with a range, a version, or options."
+        }
+      ],
+      "description": "A reference to evidence: in a claim's `evidence`, or a production's `inputs`."
+    },
+    "ReferenceDetail": {
+      "additionalProperties": false,
+      "description": "Detailed reference.",
+      "properties": {
+        "as": {
+          "description": "Inputs only: name used in placeholders (`{input.<name>}`); defaults to the id.",
+          "type": "string"
+        },
+        "path": {
+          "description": "For directory subjects: path of the file inside the directory.",
+          "type": "string"
+        },
+        "ref": {
+          "description": "Evidence id.",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "A fixed version (`sha256:…`). Without it, the reference follows the current version."
+        },
+        "satisfies": {
+          "description": "Claims only: id of the requirement (declared by the referenced evidence) that this\nreference satisfies.",
+          "type": "string"
+        },
+        "select": {
+          "$ref": "#/$defs/Selector",
+          "description": "Part of the referenced subject; only changes of this part count."
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "type": "object"
+    },
+    "Requirement": {
+      "additionalProperties": false,
+      "description": "A requirement defined by this subject (`[[requirements]]`).",
+      "properties": {
+        "id": {
+          "description": "Stable id, unique within the file.",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "type": "string"
+        },
+        "note": {
+          "description": "Free-form note.",
+          "type": "string"
+        },
+        "select": {
+          "$ref": "#/$defs/Selector",
+          "description": "The range of the subject stating the requirement."
+        }
+      },
+      "required": [
+        "id",
+        "select"
+      ],
+      "type": "object"
+    },
+    "RunRecord": {
+      "additionalProperties": false,
+      "description": "The last successful run of a production.",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/TimestampSchema",
+          "description": "When the run finished (the last successful check, even if nothing changed)."
+        },
+        "claims": {
+          "description": "Claim-writing productions: the ids of the claims returned.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "fingerprint": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "Fingerprint of the production definition the run used (absent for migrated records)."
+        },
+        "fingerprint_version": {
+          "description": "Version of the fingerprint algorithm.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InputVersion"
+          },
+          "description": "The version of each input actually used, by input name.",
+          "type": "object"
+        },
+        "legacy": {
+          "description": "Migrated from format version 1: the definition used is not known.",
+          "type": "boolean"
+        },
+        "locator": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Where the content came from (the evaluated `locator` table).",
+          "type": "object"
+        },
+        "namespace": {
+          "description": "Claim-writing productions: the namespace the run wrote.",
+          "type": "string"
+        },
+        "run": {
+          "description": "Run id (absent for records migrated from format version 1).",
+          "type": "string"
+        },
+        "subject": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "The subject version the run wrote, or read (claims-only runs)."
+        }
+      },
+      "required": [
+        "at"
+      ],
+      "type": "object"
     },
     "SchemaSpec": {
       "additionalProperties": false,
@@ -670,48 +859,46 @@
     },
     "State": {
       "additionalProperties": false,
-      "description": "State written by the tool after runs and reviews. Humans must not edit it.",
+      "description": "State written by the tool after runs and pins. Humans must not edit it.",
       "properties": {
-        "checked_at": {
-          "$ref": "#/$defs/TimestampSchema",
-          "description": "When the subject was last successfully checked against its source (even if unchanged)."
+        "content": {
+          "$ref": "#/$defs/ContentRecord",
+          "description": "Produced subjects: the version adopted by the last successful run that wrote it."
         },
-        "claims": {
+        "failures": {
           "additionalProperties": {
-            "$ref": "#/$defs/ClaimState"
+            "$ref": "#/$defs/FailedAttempt"
           },
-          "description": "Pins of each claim, recorded at review.",
+          "description": "The last failed attempt of each production (kept apart from its run record).",
           "type": "object"
         },
-        "inputs": {
+        "generated": {
           "additionalProperties": {
-            "$ref": "#/$defs/SnapshotIdSchema"
+            "items": {
+              "$ref": "#/$defs/Claim"
+            },
+            "type": "array"
           },
-          "description": "Snapshot of each input used by the last successful run.",
-          "type": "object"
-        },
-        "last_run": {
-          "$ref": "#/$defs/LastRun",
-          "description": "Result of the most recent run."
-        },
-        "locator": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "description": "Where the content came from (the evaluated `locator` table, e.g. a git commit).",
+          "description": "Claims returned by claim-writing productions, by production name.",
           "type": "object"
         },
         "member": {
           "$ref": "#/$defs/MemberState",
           "description": "Members: the parent's list entry this member was last produced from."
         },
-        "snapshot": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Snapshot of the subject accepted by the last successful run or review."
+        "pins": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PinRecord"
+          },
+          "description": "The pin of each claim, by claim id.",
+          "type": "object"
         },
-        "updated_at": {
-          "$ref": "#/$defs/TimestampSchema",
-          "description": "When the subject content last changed."
+        "runs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RunRecord"
+          },
+          "description": "The last successful run of each production, by production name.",
+          "type": "object"
         }
       },
       "type": "object"
@@ -729,7 +916,7 @@
   },
   "$id": "https://evidence-cli.github.io/schemas/evid.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Evidence file describing where a subject comes from. Usually a sidecar `<subject>.evid` next to the subject; `subject` places the subject elsewhere.",
+  "description": "Evidence file (format version 2) describing a subject: how it is produced, the claims about it, and the tool-managed state. Usually a sidecar `<subject>.evid` next to the subject; `subject` places the subject elsewhere.",
   "else": {
     "$ref": "#/$defs/Definition"
   },

@@ -1,32 +1,33 @@
-//! Types of the evidence file (`*.evid`) definition part.
+//! Types of the evidence file (`*.evid`) definition part, format version 2.
+//!
+//! See `docs/format-v2.md` for the format and `docs/semantics.md` for what it means.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
+use cas_fs::ObjectId;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use span_select::Selector;
 
 use crate::format::member::Members;
-use crate::format::state::State;
+use crate::format::state::{SnapshotIdSchema, State};
 
-/// Current evidence file format version.
-pub(super) const FORMAT_VERSION: u32 = 1;
+/// Format version written by this version of Evidence.
+pub(crate) const FORMAT_VERSION: u32 = 2;
 
 /// A complete evidence file: definition plus tool-managed state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
     title = "Evidence file",
-    description = "Evidence file describing where a subject comes from. Usually a sidecar `<subject>.evid` next to the subject; `subject` places the subject elsewhere."
+    description = "Evidence file (format version 2) describing a subject: how it is produced, the claims about it, and the tool-managed state. Usually a sidecar `<subject>.evid` next to the subject; `subject` places the subject elsewhere."
 )]
 pub struct EvidenceFile {
-    /// Format version. Must be `1`.
+    /// Format version. Must be `2` (version 1 files are migrated with `evidence migrate`).
     pub version: u32,
-    /// What produces the subject.
-    pub kind: Kind,
     /// Stable identifier, unique within the project.
     #[schemars(regex(pattern = r"^[a-z0-9][a-z0-9._-]*$"))]
     pub id: String,
@@ -39,6 +40,10 @@ pub struct EvidenceFile {
     /// Free-form tags for search and grouping.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Who writes the subject, e.g. `human` or `ai:claude`. Descriptive only: it changes
+    /// nothing about how the subject is updated or pinned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     /// Where the subject lives: a path relative to this evidence file's directory, or
     /// absolute. Defaults to this file's own path without `.evid` (the sidecar layout). A
     /// subject outside the project works, but draws a `subject-outside-project` warning.
@@ -49,37 +54,26 @@ pub struct EvidenceFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<Format>,
 
-    /// `source`: the command that acquires the subject.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<Action>,
-    /// `derived` (and `authored` generators): other evidence this subject is computed from.
+    /// Commands that produce the subject and/or claims. Without a production that writes
+    /// the subject, the subject is edited directly (editable).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub inputs: Vec<InputRef>,
-    /// `derived`: how the subject is computed from its inputs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transform: Option<Action>,
-    /// `authored`: optional command (e.g. an AI agent) that regenerates the subject.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generator: Option<Action>,
-    /// Optional check run on every new version of the subject before it is accepted.
+    pub productions: Vec<Production>,
+    /// Optional check run on every new version of the subject before it is adopted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<Action>,
-    /// Schema the subject must conform to.
+    /// Schema every new version of the subject must conform to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<SchemaSpec>,
 
-    /// How the subject relates to upstream change. Defaults to `living`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lifecycle: Option<Lifecycle>,
-    /// Who wrote an authored subject: `human`, `ai:<agent>`, a name, …
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub author: Option<String>,
-    /// `authored`: declares the whole subject as primary information (no upstream evidence).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<Origin>,
-    /// `authored`: ranges of the subject and the evidence they are based on.
+    /// Hand-written claims: ranges of the subject and the references they relate to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claims: Vec<Claim>,
+    /// Ranges of the subject declared as primary information (no evidence required).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primary: Vec<Primary>,
+    /// Requirements this subject defines (for requirement coverage).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirements: Vec<Requirement>,
 
     /// Makes the subject a list (a JSON array or JSONL) whose entries are kept as member
     /// pairs, each generated from a template and updated on its own.
@@ -91,33 +85,113 @@ pub struct EvidenceFile {
     pub state: Option<State>,
 }
 
-impl EvidenceFile {
-    /// Effective lifecycle (`living` unless declared otherwise).
-    pub fn lifecycle(&self) -> Lifecycle {
-        self.lifecycle.unwrap_or(Lifecycle::Living)
-    }
+/// Whether a subject is edited directly or written by a production.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentMode {
+    /// Edited directly: its current version is what the file holds.
+    Editable,
+    /// Written by a production: its current version is the one the last successful run
+    /// adopted.
+    Produced,
+}
 
-    /// The command that produces the subject for this kind, if any.
-    pub fn producer(&self) -> Option<&Action> {
-        match self.kind {
-            Kind::Source => self.source.as_ref(),
-            Kind::Derived => self.transform.as_ref(),
-            Kind::Authored => self.generator.as_ref(),
+impl ContentMode {
+    /// Lowercase name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Editable => "editable",
+            Self::Produced => "produced",
+        }
+    }
+}
+
+impl fmt::Display for ContentMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Where a claim definition comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ClaimSource<'a> {
+    /// Written in the evidence file.
+    Written,
+    /// Returned by a production (the namespace's owner).
+    Generated(&'a str),
+}
+
+impl EvidenceFile {
+    /// Whether the subject is editable or produced.
+    pub fn content_mode(&self) -> ContentMode {
+        if self.subject_writer().is_some() {
+            ContentMode::Produced
+        } else {
+            ContentMode::Editable
         }
     }
 
-    /// Ids of all evidence this file depends on (inputs and claim references), deduplicated,
-    /// in first-seen order.
-    pub fn dependencies(&self) -> Vec<&str> {
+    /// The production that writes the subject, if any.
+    pub fn subject_writer(&self) -> Option<&Production> {
+        self.productions.iter().find(|p| p.writes_subject())
+    }
+
+    /// The production named `name`.
+    pub fn production(&self, name: &str) -> Option<&Production> {
+        self.productions.iter().find(|p| p.name == name)
+    }
+
+    /// Every claim: hand-written ones first, then those generated by productions (from the
+    /// state), with where each comes from.
+    pub fn all_claims(&self) -> Vec<(&Claim, ClaimSource<'_>)> {
+        let mut out: Vec<(&Claim, ClaimSource<'_>)> = self
+            .claims
+            .iter()
+            .map(|c| (c, ClaimSource::Written))
+            .collect();
+        if let Some(state) = &self.state {
+            for (production, claims) in &state.generated {
+                out.extend(
+                    claims
+                        .iter()
+                        .map(|c| (c, ClaimSource::Generated(production.as_str()))),
+                );
+            }
+        }
+        out
+    }
+
+    /// The claim with this id (hand-written or generated).
+    pub fn claim(&self, id: &str) -> Option<(&Claim, ClaimSource<'_>)> {
+        self.all_claims().into_iter().find(|(c, _)| c.id == id)
+    }
+
+    /// Ids of evidence the productions read at their current version (inputs without a
+    /// fixed revision), deduplicated, in first-seen order. May include this file's own id.
+    pub fn input_ids(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
-        let refs = self.inputs.iter().map(InputRef::id).chain(
-            self.claims
-                .iter()
-                .flat_map(|c| c.evidence.iter().map(EvidenceRef::id)),
-        );
-        for id in refs {
-            if !out.contains(&id) {
-                out.push(id);
+        for input in self.productions.iter().flat_map(|p| &p.inputs) {
+            if input.revision().is_none() && !out.contains(&input.id()) {
+                out.push(input.id());
+            }
+        }
+        out
+    }
+
+    /// Ids referenced by claims (hand-written and generated), deduplicated. With `current_only`,
+    /// references with a fixed revision are left out.
+    pub fn claim_ref_ids(&self, current_only: bool) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for (claim, _) in self.all_claims() {
+            for r in &claim.evidence {
+                if current_only && r.is_fixed() {
+                    continue;
+                }
+                if !out.contains(&r.id()) {
+                    out.push(r.id());
+                }
             }
         }
         out
@@ -129,78 +203,360 @@ impl EvidenceFile {
     }
 }
 
-/// Evidence kind.
+/// What a production writes.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum Kind {
-    /// Primary information acquired automatically by a command.
-    Source,
-    /// Deterministically computed from other evidence.
-    Derived,
-    /// Written by a human or an AI.
-    Authored,
+pub enum Output {
+    /// The subject (`{output}`).
+    Subject,
+    /// The complete set of claims of the production's namespace (`{claims}`).
+    Claims,
 }
 
-impl Kind {
-    /// Lowercase name.
-    pub fn as_str(self) -> &'static str {
+/// A production: a command that writes the subject, claims, or both (`[[productions]]`).
+///
+/// Evidence runs commands; it has no built-in knowledge of any data source. The program runs
+/// without a shell; placeholders such as `{output}`, `{claims}`, and `{input.NAME}` are
+/// expanded in `run`, `env`, `cwd`, `stdin`, and `locator` (see `docs/format-v2.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Production {
+    /// Stable name, unique within the file. Records are kept per name.
+    #[schemars(regex(pattern = r"^[a-z0-9][a-z0-9._-]*$"))]
+    pub name: String,
+    /// What the production writes: `["subject"]`, `["claims"]`, or both.
+    #[schemars(length(min = 1))]
+    pub writes: Vec<Output>,
+    /// Claim namespace (required when `writes` has `claims`): the production owns every
+    /// claim id starting with `<namespace>.`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9_-]*(\.[A-Za-z0-9][A-Za-z0-9_-]*)*$"))]
+    pub namespace: Option<String>,
+    /// Program and arguments, e.g. `["curl", "-sSfo", "{output}", "https://…"]`.
+    #[schemars(length(min = 1))]
+    pub run: Vec<String>,
+    /// Write the program's standard output to the main output: `{output}` when the
+    /// production writes the subject, else `{claims}`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stdout: bool,
+    /// File fed to the program's standard input (relative to the evidence file).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdin: Option<String>,
+    /// Extra environment variables for the program.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Working directory, relative to the evidence file. Defaults to its directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Kill the program after this long (default: `execution.timeout` from the config).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<Interval>,
+    /// Minimum time between runs by a plain `evidence update`. Without it, the production
+    /// runs only when something changed or when requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<Interval>,
+    /// Evidence the command reads. A change of an input's selected content is a reason to
+    /// re-run the production.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<Reference>,
+    /// Where the content came from, recorded after each successful run: a fixed value
+    /// (placeholders expanded) or a command whose trimmed standard output is the value.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub locator: BTreeMap<String, LocatorValue>,
+}
+
+impl Production {
+    /// Whether the production writes the subject.
+    pub fn writes_subject(&self) -> bool {
+        self.writes.contains(&Output::Subject)
+    }
+
+    /// Whether the production writes claims.
+    pub fn writes_claims(&self) -> bool {
+        self.writes.contains(&Output::Claims)
+    }
+
+    /// The program (first element of `run`).
+    pub fn program(&self) -> &str {
+        self.run.first().map_or("", String::as_str)
+    }
+
+    /// The command part, as an [`Action`].
+    pub fn action(&self) -> Action {
+        Action {
+            run: self.run.clone(),
+            stdout: self.stdout,
+            stdin: self.stdin.clone(),
+            env: self.env.clone(),
+            cwd: self.cwd.clone(),
+            timeout: self.timeout,
+            locator: self.locator.clone(),
+        }
+    }
+
+    /// Whether claim `id` lies in this production's namespace.
+    pub fn owns(&self, id: &str) -> bool {
+        self.namespace
+            .as_deref()
+            .is_some_and(|ns| in_namespace(ns, id))
+    }
+}
+
+/// Whether claim `id` lies in namespace `ns` (starts with `ns.`).
+pub(crate) fn in_namespace(ns: &str, id: &str) -> bool {
+    id.strip_prefix(ns)
+        .is_some_and(|rest| rest.starts_with('.'))
+}
+
+/// Whether two namespaces overlap (one is the other or inside it).
+pub(crate) fn namespaces_overlap(a: &str, b: &str) -> bool {
+    a == b || in_namespace(a, b) || in_namespace(b, a)
+}
+
+/// A command: `[verify]`, and the command part of a production.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Action {
+    /// Program and arguments.
+    #[schemars(length(min = 1))]
+    pub run: Vec<String>,
+    /// Write the program's standard output to the main output.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stdout: bool,
+    /// File fed to the program's standard input (relative to the evidence file).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdin: Option<String>,
+    /// Extra environment variables for the program.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Working directory, relative to the evidence file. Defaults to its directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Kill the program after this long (default: `execution.timeout` from the config).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<Interval>,
+    /// Locator entries (not allowed in `[verify]`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub locator: BTreeMap<String, LocatorValue>,
+}
+
+impl Action {
+    /// The program (first element of `run`).
+    pub fn program(&self) -> &str {
+        self.run.first().map_or("", String::as_str)
+    }
+}
+
+/// A locator entry: a value or a command printing the value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum LocatorValue {
+    /// A fixed value; placeholders except `{env.NAME}` are expanded.
+    Text(String),
+    /// A command (no shell) whose trimmed standard output is the value.
+    Command(Vec<String>),
+}
+
+/// Subject schema (`[schema]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SchemaSpec {
+    /// Path to a JSON Schema, relative to the evidence file.
+    pub json_schema: String,
+}
+
+/// A claim: a range of the subject and the references it relates to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Claim {
+    /// Identifier, unique within the file.
+    #[schemars(regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"))]
+    pub id: String,
+    /// The range of the subject this claim is about.
+    pub select: Selector,
+    /// References the range relates to (at least one).
+    #[schemars(length(min = 1))]
+    pub evidence: Vec<Reference>,
+    /// Free-form note (reasoning, caveats). Part of the definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// A range declared as primary information (`[[primary]]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Primary {
+    /// The range (`{ whole = true }` for the whole subject).
+    pub select: Selector,
+    /// Free-form note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// A requirement defined by this subject (`[[requirements]]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Requirement {
+    /// Stable id, unique within the file.
+    #[schemars(regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"))]
+    pub id: String,
+    /// The range of the subject stating the requirement.
+    pub select: Selector,
+    /// Free-form note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// A reference to evidence: in a claim's `evidence`, or a production's `inputs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum Reference {
+    /// Evidence id (the whole subject, current version).
+    Id(String),
+    /// Evidence id with a range, a version, or options.
+    Detailed(ReferenceDetail),
+}
+
+/// Detailed reference.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceDetail {
+    /// Evidence id.
+    #[serde(rename = "ref")]
+    #[schemars(regex(pattern = r"^[a-z0-9][a-z0-9._-]*$"))]
+    pub reference: String,
+    /// Part of the referenced subject; only changes of this part count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<Selector>,
+    /// For directory subjects: path of the file inside the directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// A fixed version (`sha256:…`). Without it, the reference follows the current version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<SnapshotIdSchema>")]
+    pub revision: Option<ObjectId>,
+    /// Inputs only: name used in placeholders (`{input.<name>}`); defaults to the id.
+    #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    /// Claims only: id of the requirement (declared by the referenced evidence) that this
+    /// reference satisfies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub satisfies: Option<String>,
+    /// Set only when a version 1 file is read: the reference is fixed, but its revision is
+    /// not known (no pin recorded one).
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub(crate) revision_unknown: bool,
+}
+
+/// The version a reference resolves to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case", tag = "version", content = "revision")]
+pub enum RefVersion {
+    /// The current version of the target.
+    Current,
+    /// A fixed version (`None`: fixed, but the revision is not known).
+    Revision(Option<ObjectId>),
+}
+
+impl Reference {
+    /// A reference to the whole current version of `id`.
+    pub fn to_id(id: impl Into<String>) -> Self {
+        Self::Id(id.into())
+    }
+
+    /// Referenced evidence id.
+    pub fn id(&self) -> &str {
         match self {
-            Self::Source => "source",
-            Self::Derived => "derived",
-            Self::Authored => "authored",
+            Self::Id(id) => id,
+            Self::Detailed(d) => &d.reference,
         }
     }
-}
 
-impl fmt::Display for Kind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for Kind {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "source" => Ok(Self::Source),
-            "derived" => Ok(Self::Derived),
-            "authored" => Ok(Self::Authored),
-            other => Err(format!(
-                "unknown kind `{other}` (expected source, derived, or authored)"
-            )),
+    /// The detailed form (a bare id becomes `{ ref = id }`).
+    pub fn detail(&self) -> ReferenceDetail {
+        match self {
+            Self::Id(id) => ReferenceDetail {
+                reference: id.clone(),
+                ..ReferenceDetail::default()
+            },
+            Self::Detailed(d) => d.clone(),
         }
     }
-}
 
-/// How a subject relates to upstream change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum Lifecycle {
-    /// One-off artifact pinned to the evidence it was written against; never becomes stale
-    /// because of upstream change.
-    Snapshot,
-    /// Must track upstream; becomes stale when referenced evidence changes.
-    Living,
-}
-
-impl fmt::Display for Lifecycle {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Snapshot => "snapshot",
-            Self::Living => "living",
-        })
+    fn detailed(&self) -> Option<&ReferenceDetail> {
+        match self {
+            Self::Id(_) => None,
+            Self::Detailed(d) => Some(d),
+        }
     }
-}
 
-/// Declares content as primary information.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum Origin {
-    /// Primary information: intentionally not backed by other evidence.
-    Primary,
+    /// Selector into the referenced subject.
+    pub fn selector(&self) -> Option<&Selector> {
+        self.detailed().and_then(|d| d.select.as_ref())
+    }
+
+    /// Path inside a directory subject.
+    pub fn path(&self) -> Option<&str> {
+        self.detailed().and_then(|d| d.path.as_deref())
+    }
+
+    /// The fixed revision, if the reference names one.
+    pub fn revision(&self) -> Option<ObjectId> {
+        self.detailed().and_then(|d| d.revision)
+    }
+
+    /// The version this reference resolves to.
+    pub fn version(&self) -> RefVersion {
+        match self.detailed() {
+            Some(d) if d.revision.is_some() || d.revision_unknown => {
+                RefVersion::Revision(d.revision)
+            }
+            _ => RefVersion::Current,
+        }
+    }
+
+    /// Whether the reference is fixed to a revision (known or not).
+    pub fn is_fixed(&self) -> bool {
+        matches!(self.version(), RefVersion::Revision(_))
+    }
+
+    /// Placeholder name (inputs).
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Id(id) => id,
+            Self::Detailed(d) => d.alias.as_deref().unwrap_or(&d.reference),
+        }
+    }
+
+    /// The requirement this reference satisfies (claims).
+    pub fn satisfies(&self) -> Option<&str> {
+        self.detailed().and_then(|d| d.satisfies.as_deref())
+    }
+
+    /// A stable textual key: `id`, then `:path`, `#selector`, and `@revision` when present.
+    pub fn key(&self) -> String {
+        let mut key = self.id().to_owned();
+        if let Some(path) = self.path() {
+            key.push(':');
+            key.push_str(path);
+        }
+        if let Some(sel) = self.selector() {
+            key.push('#');
+            key.push_str(&sel.to_string());
+        }
+        match self.version() {
+            RefVersion::Current => {}
+            RefVersion::Revision(Some(r)) => {
+                key.push('@');
+                key.push_str(&r.to_string());
+            }
+            RefVersion::Revision(None) => key.push_str("@?"),
+        }
+        key
+    }
 }
 
 /// Subject format.
@@ -250,195 +606,6 @@ impl Format {
     /// Whether the format is line-oriented text (selectors and coverage apply).
     pub fn is_text(self) -> bool {
         !matches!(self, Self::Directory | Self::Binary)
-    }
-}
-
-/// A command (`[source]`, `[transform]`, `[generator]`, `[verify]`).
-///
-/// Evidence runs commands; it has no built-in knowledge of any data source. Anything that can
-/// be fetched or computed by a program (`curl`, `git`, `bq`, `jq`, an SBOM tool, an AI agent)
-/// can be evidence. The program runs without a shell; placeholders such as `{output}` and
-/// `{input.NAME}` are expanded in `run`, `env`, `cwd`, and `locator` (see `docs/format.md`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Action {
-    /// Program and arguments, e.g. `["curl", "-sSfo", "{output}", "https://…"]`.
-    #[schemars(length(min = 1))]
-    pub run: Vec<String>,
-    /// Write the program's standard output to `{output}` (instead of the program writing it).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub stdout: bool,
-    /// File fed to the program's standard input (relative to the evidence file), e.g. a SQL
-    /// query or an AI prompt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stdin: Option<String>,
-    /// Extra environment variables for the program.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<String, String>,
-    /// Working directory, relative to the evidence file. Defaults to its directory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    /// Kill the program after this long (default: `execution.timeout` from the config).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<Interval>,
-    /// `[source]` only: minimum time between refreshes by `evidence update` (e.g. `6h`,
-    /// `1d`). Without an interval the source is refreshed only explicitly.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interval: Option<Interval>,
-    /// Where the content came from, recorded in the state after each successful run: a fixed
-    /// value (placeholders expanded) or a command whose trimmed standard output is the value,
-    /// e.g. `commit = ["git", "-C", "{output}", "rev-parse", "HEAD"]`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub locator: BTreeMap<String, LocatorValue>,
-}
-
-impl Action {
-    /// The program (first element of `run`).
-    pub fn program(&self) -> &str {
-        self.run.first().map_or("", String::as_str)
-    }
-}
-
-/// A locator entry: a value or a command printing the value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
-pub enum LocatorValue {
-    /// A fixed value; placeholders except `{env.NAME}` are expanded.
-    Text(String),
-    /// A command (no shell) whose trimmed standard output is the value.
-    Command(Vec<String>),
-}
-
-/// Subject schema (`[schema]`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SchemaSpec {
-    /// Path to a JSON Schema, relative to the evidence file.
-    pub json_schema: String,
-}
-
-/// A dependency on another evidence (`inputs`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
-pub enum InputRef {
-    /// Evidence id.
-    Id(String),
-    /// Evidence id with options.
-    Detailed(InputDetail),
-}
-
-/// Detailed input reference.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct InputDetail {
-    /// Evidence id.
-    #[serde(rename = "ref")]
-    pub reference: String,
-    /// Name used in placeholders (`{input.<name>}`); defaults to the id.
-    #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
-    pub alias: Option<String>,
-}
-
-impl InputRef {
-    /// Referenced evidence id.
-    pub fn id(&self) -> &str {
-        match self {
-            Self::Id(id) => id,
-            Self::Detailed(d) => &d.reference,
-        }
-    }
-
-    /// Placeholder name.
-    pub fn name(&self) -> &str {
-        match self {
-            Self::Id(id) => id,
-            Self::Detailed(d) => d.alias.as_deref().unwrap_or(&d.reference),
-        }
-    }
-}
-
-/// A claim: a range of the subject and the evidence it is based on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Claim {
-    /// Identifier, unique within the file.
-    #[schemars(regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"))]
-    pub id: String,
-    /// The range of the subject this claim covers.
-    pub select: Selector,
-    /// Evidence backing the range. Empty only when `origin = "primary"`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evidence: Vec<EvidenceRef>,
-    /// Declares the range as primary information.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<Origin>,
-    /// Free-form note (reasoning, caveats).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-}
-
-/// A reference from a claim to evidence, optionally to a part of it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
-pub enum EvidenceRef {
-    /// Evidence id (the whole subject).
-    Id(String),
-    /// Evidence id and a selector into its subject.
-    Detailed(EvidenceDetail),
-}
-
-/// Detailed evidence reference.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct EvidenceDetail {
-    /// Evidence id.
-    #[serde(rename = "ref")]
-    pub reference: String,
-    /// Part of the referenced subject; the claim only becomes stale when this part changes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub select: Option<Selector>,
-    /// For directory subjects: path of the file inside the directory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-}
-
-impl EvidenceRef {
-    /// Referenced evidence id.
-    pub fn id(&self) -> &str {
-        match self {
-            Self::Id(id) => id,
-            Self::Detailed(d) => &d.reference,
-        }
-    }
-
-    /// Selector into the referenced subject.
-    pub fn selector(&self) -> Option<&Selector> {
-        match self {
-            Self::Id(_) => None,
-            Self::Detailed(d) => d.select.as_ref(),
-        }
-    }
-
-    /// Path inside a directory subject.
-    pub fn path(&self) -> Option<&str> {
-        match self {
-            Self::Id(_) => None,
-            Self::Detailed(d) => d.path.as_deref(),
-        }
-    }
-
-    /// A stable textual key: `id`, `id:path`, `id#selector`, or `id:path#selector`.
-    pub fn key(&self) -> String {
-        let mut key = self.id().to_owned();
-        if let Some(path) = self.path() {
-            key.push(':');
-            key.push_str(path);
-        }
-        if let Some(sel) = self.selector() {
-            key.push('#');
-            key.push_str(&sel.to_string());
-        }
-        key
     }
 }
 
@@ -503,9 +670,8 @@ impl JsonSchema for Interval {
 }
 
 #[cfg(test)]
-mod interval_tests {
-    use super::Interval;
-    use std::time::Duration;
+mod tests {
+    use super::*;
 
     #[test]
     fn parses_fixed_units() {
@@ -533,5 +699,36 @@ mod interval_tests {
     fn displays_friendly() {
         assert_eq!("6h".parse::<Interval>().unwrap().to_string(), "6h");
         assert_eq!("90m".parse::<Interval>().unwrap().to_string(), "1h 30m");
+    }
+
+    #[test]
+    fn namespaces() {
+        assert!(in_namespace("gen", "gen.a"));
+        assert!(!in_namespace("gen", "gen"));
+        assert!(!in_namespace("gen", "general"));
+        assert!(namespaces_overlap("gen", "gen.sub"));
+        assert!(namespaces_overlap("gen", "gen"));
+        assert!(!namespaces_overlap("gen", "general"));
+    }
+
+    #[test]
+    fn reference_keys_and_versions() {
+        let fixed: ObjectId = ObjectId::of(b"x");
+        let r = Reference::Detailed(ReferenceDetail {
+            reference: "req".into(),
+            select: Some(Selector::Heading("## R1".into())),
+            revision: Some(fixed),
+            ..ReferenceDetail::default()
+        });
+        assert_eq!(r.version(), RefVersion::Revision(Some(fixed)));
+        assert_eq!(r.key(), format!("req#heading=## R1@{fixed}"));
+        assert_eq!(Reference::to_id("a").version(), RefVersion::Current);
+        assert_eq!(
+            Reference::to_id("a").detail(),
+            ReferenceDetail {
+                reference: "a".into(),
+                ..ReferenceDetail::default()
+            }
+        );
     }
 }

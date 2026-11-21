@@ -72,8 +72,7 @@ impl Out {
 
     pub(crate) fn claim(self, h: ClaimHealth) -> String {
         let style = match h {
-            ClaimHealth::Covered => Style::Green,
-            ClaimHealth::Primary => Style::Cyan,
+            ClaimHealth::Matched => Style::Green,
             ClaimHealth::Stale => Style::Yellow,
             ClaimHealth::Broken => Style::Red,
         };
@@ -82,7 +81,7 @@ impl Out {
 
     pub(crate) fn line_status(self, s: LineStatus) -> String {
         let style = match s {
-            LineStatus::Covered => Style::Green,
+            LineStatus::Matched => Style::Green,
             LineStatus::Primary => Style::Cyan,
             LineStatus::Stale => Style::Yellow,
             LineStatus::Broken => Style::Red,
@@ -91,7 +90,7 @@ impl Out {
         self.paint(format!("{:<9}", s.as_str()), style)
     }
 
-    /// Prints `{"version": 1, "<key>": value}`.
+    /// Prints `{"version": 2, "<key>": value}`.
     #[allow(clippy::unused_self)] // keeps call sites uniform: `ctx.out.emit(..)`
     pub(crate) fn emit<T: Serialize>(self, key: &str, value: &T) -> anyhow::Result<()> {
         let mut obj = serde_json::Map::new();

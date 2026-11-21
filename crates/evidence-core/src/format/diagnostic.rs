@@ -6,9 +6,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 /// Severity of a diagnostic.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, schemars::JsonSchema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     /// Informational; never fails a command.
@@ -27,7 +25,7 @@ impl fmt::Display for Severity {
 }
 
 /// A problem found in an evidence file, configuration, or subject.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Diagnostic {
     /// Severity.
     pub severity: Severity,

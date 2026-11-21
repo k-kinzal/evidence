@@ -48,17 +48,15 @@ fn workspace_root() -> PathBuf {
 
 /// Every published schema: path under `schemas/` and its content.
 fn all_schemas() -> Vec<(&'static str, serde_json::Value)> {
-    let mut out = vec![
+    vec![
         ("evid.schema.json", evidence_core::format::evid_schema()),
         ("config.schema.json", evidence_core::format::config_schema()),
-    ];
-    out.extend(evidence_core::output_schemas());
-    out
+    ]
 }
 
 fn schemas(check: bool) -> Result<()> {
     let dir = workspace_root().join("schemas");
-    let mut stale = Vec::new();
+    let mut stale: Vec<String> = Vec::new();
     for (name, schema) in all_schemas() {
         let path = dir.join(name);
         let text = format!("{}\n", serde_json::to_string_pretty(&schema)?);
@@ -67,13 +65,40 @@ fn schemas(check: bool) -> Result<()> {
             continue;
         }
         if check {
-            stale.push(name);
+            stale.push(name.to_owned());
         } else {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
             writeln!(std::io::stdout().lock(), "wrote schemas/{name}")?;
+        }
+    }
+    // Schemas no longer generated are not published.
+    let published: Vec<&str> = all_schemas().iter().map(|(name, _)| *name).collect();
+    let mut orphans = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type()?.is_dir()
+            || (file.ends_with(".schema.json") && !published.contains(&file.as_str()))
+        {
+            orphans.push(file);
+        }
+    }
+    orphans.sort();
+    for name in orphans {
+        if check {
+            stale.push(name);
+        } else {
+            let path = dir.join(&name);
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            }
+            .with_context(|| format!("removing schemas/{name}"))?;
+            writeln!(std::io::stdout().lock(), "removed schemas/{name}")?;
         }
     }
     if !stale.is_empty() {
