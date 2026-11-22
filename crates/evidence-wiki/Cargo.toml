@@ -1,0 +1,38 @@
+[package]
+name = "evidence-wiki"
+description = "A wiki over an Evidence project: pages, links, categories, search, tables, diagrams; a server with MCP and scheduled agents, and static output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["evidence", "wiki", "mcp", "llm", "knowledge-base"]
+categories = ["command-line-utilities", "web-programming::http-server"]
+
+[[bin]]
+name = "evidence-wiki"
+path = "src/main.rs"
+
+[dependencies]
+aho-corasick = "1"
+anyhow.workspace = true
+clap.workspace = true
+csv.workspace = true
+evidence-core = { workspace = true, features = ["index"] }
+ignore.workspace = true
+jiff.workspace = true
+percent-encoding.workspace = true
+pulldown-cmark = { workspace = true, features = ["html"] }
+regex.workspace = true
+rusqlite = { workspace = true, features = ["limits"] }
+serde.workspace = true
+serde_json.workspace = true
+tiny_http.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -15,6 +15,15 @@ It answers:
 - **Which parts of this report are backed by evidence?** Claims map ranges of a document to
   evidence. `evidence coverage` shows matched, stale, broken, uncovered, and primary lines;
   `evidence coverage --requirements` shows which requirements are satisfied.
+- **How much of a source is actually used as evidence?** `evidence coverage --used <targets>`
+  counts the lines that claims anywhere select in each target: a pair, a file or directory
+  inside a directory subject, or every pair. `[[scope]]` in a `.evid` narrows what counts (a
+  chapter that matters, not the front matter); `--from` narrows which claims count.
+- **Is a high coverage earned?** A claim over most of its document, or a reference to most of a
+  file, is *broad* (`[coverage]` `broad_share` and `broad_min_lines` in the configuration).
+  Both coverages are also reported without broad ranges (*narrow*), and
+  `evidence coverage --broad` lists them until each is acknowledged with `broad = "why"` on
+  its claim.
 - **What did the source look like when the report was written?** Pins plus the object store:
   `evidence cat sha256:…`. A reference can also name a fixed `revision`.
 
@@ -66,32 +75,31 @@ Every command accepts `--json`. The output is an envelope `{"version": 2, "<key>
 (failed runs, failed pins, blocked migrations, validation errors, denied states), `2` the
 command could not run (including usage errors such as `update --pin --force`).
 
-## Desktop app
+## Wiki
 
-`evidence-ui [PROJECT_DIR] [ID]` opens a wiki-like browser (GPUI). It shows:
+`evidence-wiki` turns a project into a wiki that agents write and keep up to date while
+every statement stays traceable (see [crates/evidence-wiki](crates/evidence-wiki)):
 
-- every pair with its freshness, filterable by content mode, runnable productions, claims,
-  and diagnostics;
-- subjects with coverage highlighting (never overlaid on a produced file modified outside a
-  run);
-- fixed revisions of references and their difference from the current version;
-- the evidence file, state, and locator;
-- upstream, downstream, and impact navigation;
-- history with snapshot diffs.
+```sh
+evidence-wiki init --title "Security wiki"   # config, home page, Claude Code skills
+evidence-wiki serve                          # http://127.0.0.1:4000/, MCP at /mcp, scheduled agents
+evidence-wiki build --out _site              # static site
+claude -p /evidence-wiki                     # check what the wiki lacks and fix it
+```
 
-It refreshes automatically when files change.
-
-## Documentation
-
-- [docs/semantics.md](docs/semantics.md): what every record means, invariants, and events
-- [docs/format-v2.md](docs/format-v2.md): the evidence file format, productions and
-  placeholders, claims, references, selectors, and state
-- [docs/cli.md](docs/cli.md): commands, exit codes, and JSON output
-- [docs/migration.md](docs/migration.md): converting version 1 files
-- [docs/traceability.md](docs/traceability.md): invariants and acceptance criteria mapped to
-  tests
-- `evidence schema evid` / `evidence schema config`: JSON Schemas of the evidence file and
-  configuration formats (also in [`schemas/`](schemas))
+- Every pair is a page: Markdown as articles, CSV/JSON/JSONL/TOML as data grids (SQL on
+  the server), images, text. `[wiki]` in an evidence file adds aliases, categories, and
+  the kind of page (`article`, `category`, `term`).
+- `[[links]]` with backlinks, category pages, tags, a directory view, search, Mermaid,
+  Graphviz, and Vega-Lite diagrams; each page shows its claims and sources.
+- `evidence-wiki check` reports what is missing (wanted pages, stale evidence, categories,
+  terms used on several pages, unlinked mentions, unused sources), each with the skill
+  that fixes it: `/evidence-wiki` dispatches to `/evidence-wiki-page`,
+  `/evidence-wiki-update-category`, `/evidence-wiki-term`, `/evidence-wiki-link`,
+  `/evidence-wiki-ingest`, and `/evidence-wiki-refresh`.
+- The server runs agents such as `claude -p /evidence-wiki` on a schedule and offers MCP
+  tools for agentic search (`search`, `read_page` by section, `links`, `grep`,
+  `query_table`, `evidence`, …).
 
 ## Workspace
 
@@ -103,7 +111,7 @@ Each crate has a README describing its role.
 | [`span-select`](crates/span-select) | Line, Markdown heading, marker, and JSON Pointer selectors, re-anchoring, coverage. Generic |
 | [`evidence-core`](crates/evidence-core) | Everything Evidence does, behind one entry point (`Project`); file formats in `evidence_core::format`; optional SQLite search index (feature `index`) |
 | [`evidence-cli`](crates/evidence-cli) | The `evidence` binary |
-| [`evidence-ui`](crates/evidence-ui) | The `evidence-ui` desktop app |
+| [`evidence-wiki`](crates/evidence-wiki) | The `evidence-wiki` binary: wiki server, static site, MCP, scheduled agents, and skills |
 | [`xtask`](xtask) | `cargo xtask schemas [--check]`, `cargo xtask vocabulary` |
 | [`fuzz`](fuzz) | Fuzz targets for the evidence file parser and selectors (nightly, separate workspace) |
 

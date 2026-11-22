@@ -103,10 +103,26 @@ pub(crate) enum Command {
         strict: bool,
     },
     /// Line coverage of a pair's current version by its claims and primary ranges, or (with
-    /// --requirements) which of its requirements are satisfied.
+    /// --used) how much of it the references of claims select, or (with --requirements) which
+    /// of its requirements are satisfied. `[[scope]]` says which part of a subject counts;
+    /// `[coverage]` of the configuration says when a range is broad.
     Coverage {
-        /// Id or path.
-        target: String,
+        /// Ids or paths: a pair, a directory of pairs, or a file or directory inside a
+        /// directory subject (with --used). None: every pair.
+        targets: Vec<String>,
+        /// Usage coverage: how much of each target the references of claims select.
+        #[arg(long, conflicts_with = "requirements")]
+        used: bool,
+        /// With --used: count only the claims of these pairs (ids or paths).
+        #[arg(long, requires = "used", value_name = "TARGET")]
+        from: Vec<String>,
+        /// With --used: one row per file of a directory subject.
+        #[arg(long, requires = "used")]
+        files: bool,
+        /// List broad claim ranges of the targets and broad references to them; fail if one
+        /// is not acknowledged (`broad = "…"` on the claim).
+        #[arg(long, conflicts_with_all = ["requirements", "used"])]
+        broad: bool,
         /// Fail if the matched-or-primary share (or, with --requirements, the matched share)
         /// is below this percentage.
         #[arg(long, value_name = "PERCENT")]

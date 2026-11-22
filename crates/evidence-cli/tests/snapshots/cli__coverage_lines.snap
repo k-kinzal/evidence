@@ -2,7 +2,7 @@
 source: crates/evidence-cli/tests/cli.rs
 expression: "p.stdout(&[\"coverage\", \"report\", \"--lines\"])"
 ---
-report.md sha256:000c2a7080c4  75.0% backed (75.0% by matched claims, rest primary)
+report.md sha256:000c2a7080c4  75.0% backed (75.0% by matched claims, rest primary); without broad claims 75.0% (75.0%)
   matched 3  primary 0  stale 0  broken 0  uncovered 1  (non-blank lines)
 uncovered     1 | # Report
 uncovered     2 | 

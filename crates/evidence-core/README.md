@@ -1,8 +1,8 @@
 # evidence-core
 
 Everything Evidence does, as a library: provenance, freshness, and coverage for a body of
-knowledge built from files. The `evidence` CLI and the `evidence-ui` desktop app are thin
-front ends over this crate.
+knowledge built from files. The `evidence` CLI and `evidence-wiki` are thin front ends over
+this crate.
 
 **Role:** one deep module with one entry point. Open a `Project` once, then ask it questions
 or tell it to change something. What the caller never has to know:

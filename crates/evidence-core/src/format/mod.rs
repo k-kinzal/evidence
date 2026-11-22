@@ -18,12 +18,15 @@ pub(crate) mod template;
 pub mod v1;
 
 pub use cas_fs::ObjectId;
-pub use config::{Config, DiscoveryConfig, ExecutionConfig, IndexConfig, StoreConfig, UserConfig};
+pub use config::{
+    Config, CoverageConfig, DiscoveryConfig, ExecutionConfig, IndexConfig, StoreConfig, UserConfig,
+};
 pub use diagnostic::{Diagnostic, Severity};
 pub use document::{Parsed, evid_path, parse, render, replace_state, subject_path};
 pub use evid::{
     Action, Claim, ClaimSource, ContentMode, EvidenceFile, Format, Interval, LocatorValue, Output,
-    Primary, Production, RefVersion, Reference, ReferenceDetail, Requirement, SchemaSpec,
+    PageKind, Primary, Production, RefVersion, Reference, ReferenceDetail, Requirement, SchemaSpec,
+    Scope, WikiPage,
 };
 pub(crate) use member::{Entry, List, compose_file, entries};
 pub use member::{MemberFile, Members, OnRemoved};

@@ -1,9 +1,22 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "xtask"]
+members = [
+    "crates/cas-fs",
+    "crates/span-select",
+    "crates/evidence-core",
+    "crates/evidence-cli",
+    "crates/evidence-wiki",
+    "xtask",
+]
 # Fuzz targets need nightly and libFuzzer: `cargo +nightly fuzz run <target>` (see fuzz/).
 exclude = ["fuzz"]
-default-members = ["crates/*"]
+default-members = [
+    "crates/cas-fs",
+    "crates/span-select",
+    "crates/evidence-core",
+    "crates/evidence-cli",
+    "crates/evidence-wiki",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -67,8 +80,10 @@ clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 clap_complete = "4"
 pulldown-cmark = { version = "0.13", default-features = false }
 rusqlite = { version = "0.43", features = ["bundled"] }
-similar = "3"
-gpui = "0.2.2"
+tiny_http = "0.12"
+csv = "1"
+regex = "1"
+percent-encoding = "2"
 # test
 insta = { version = "1", features = ["json", "yaml"] }
 proptest = "1"

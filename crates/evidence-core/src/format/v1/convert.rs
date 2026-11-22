@@ -104,6 +104,8 @@ pub fn to_v2(f: &V1File) -> Converted {
         claims: Vec::new(),
         primary: Vec::new(),
         requirements: Vec::new(),
+        scope: Vec::new(),
+        wiki: None,
         members: f.members.clone().map(|mut m| {
             match template_to_v2(&m.template) {
                 Ok(t) => m.template = t,
@@ -215,6 +217,7 @@ pub fn to_v2(f: &V1File) -> Converted {
             select: c.select.clone(),
             evidence,
             note: c.note.clone(),
+            broad: None,
         });
     }
     if f.origin == Some(Origin::Primary) {

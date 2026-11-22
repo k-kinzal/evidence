@@ -74,11 +74,21 @@ pub struct EvidenceFile {
     /// Requirements this subject defines (for requirement coverage).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requirements: Vec<Requirement>,
+    /// The parts of the subject that coverage counts. Without an including entry the whole
+    /// subject counts; entries with `exclude = true` then remove parts (front matter, chapters
+    /// that nothing depends on).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope: Vec<Scope>,
 
     /// Makes the subject a list (a JSON array or JSONL) whose entries are kept as member
     /// pairs, each generated from a template and updated on its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub members: Option<Members>,
+
+    /// How the subject appears in a wiki (`evidence-wiki`): other names, categories, and the
+    /// kind of page. Evidence itself does not read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wiki: Option<WikiPage>,
 
     /// Tool-managed state. Never edit by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -382,6 +392,12 @@ pub struct Claim {
     /// Free-form note (reasoning, caveats). Part of the definition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Why this claim's range, or a range it references, is broad on purpose (`[coverage]`
+    /// of the configuration says when a range is broad). Acknowledged broad ranges are still
+    /// reported and still left out of narrow coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1))]
+    pub broad: Option<String>,
 }
 
 /// A range declared as primary information (`[[primary]]`).
@@ -407,6 +423,79 @@ pub struct Requirement {
     /// Free-form note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+/// A part of the subject that coverage counts, or (with `exclude`) leaves out (`[[scope]]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Scope {
+    /// For directory subjects: a file, or a directory (every file under it), inside the
+    /// subject. Without it the entry is about every file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1))]
+    pub path: Option<String>,
+    /// The range of each file the entry is about. Without it, whole files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<Selector>,
+    /// Leave the part out of coverage instead of counting it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exclude: bool,
+    /// Free-form note (why the part counts or does not).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// How a subject appears in a wiki (`[wiki]`).
+///
+/// Every pair is a page of the wiki. This table only adds what the evidence file does not say
+/// already: the title, description, and tags are the evidence file's own.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WikiPage {
+    /// What the page is. Defaults to `article`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PageKind>,
+    /// Other names the page is found and linked by (`[[alias]]` links to it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    /// Categories the page belongs to. Each names a category page by its title, an alias, or
+    /// its id, the same way a `[[link]]` does; a category without a page is *wanted*.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<String>,
+    /// Leave the page out of navigation, listings, and search (it can still be linked).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+}
+
+/// The kind of a wiki page.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PageKind {
+    /// An ordinary page.
+    Article,
+    /// A category page: lists the pages that name it in `categories`.
+    Category,
+    /// A term (glossary) page: explains a word used across several pages.
+    Term,
+}
+
+impl PageKind {
+    /// Lowercase name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Article => "article",
+            Self::Category => "category",
+            Self::Term => "term",
+        }
+    }
+}
+
+impl fmt::Display for PageKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// A reference to evidence: in a claim's `evidence`, or a production's `inputs`.

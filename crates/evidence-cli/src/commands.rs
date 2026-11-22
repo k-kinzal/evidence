@@ -59,16 +59,31 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
         } => run_review(&ctx, &targets, &claims, by),
         Command::Validate { targets, strict } => run_validate(&ctx, &targets, strict),
         Command::Coverage {
-            target,
+            targets,
+            used,
+            from,
+            files,
+            broad,
             min,
             lines,
             requirements,
             revision,
         } => {
             if requirements {
-                run_requirements(&ctx, &target, min, revision.as_deref())
+                let [target] = targets.as_slice() else {
+                    anyhow::bail!("--requirements takes exactly one target");
+                };
+                run_requirements(&ctx, target, min, revision.as_deref())
+            } else if broad {
+                run_broad(&ctx, &targets)
+            } else if used {
+                run_usage(&ctx, &targets, &from, min, lines, files)
+            } else if let [target] = targets.as_slice()
+                && ctx.project()?.select(std::slice::from_ref(target))?.len() == 1
+            {
+                run_coverage(&ctx, target, min, lines)
             } else {
-                run_coverage(&ctx, &target, min, lines)
+                run_coverages(&ctx, &targets, min)
             }
         }
         Command::Tree {
@@ -541,11 +556,13 @@ fn run_coverage(ctx: &Ctx, target: &str, min: Option<f64>, lines: bool) -> Resul
     let o = &ctx.out;
     let c = &report.counts;
     say!(
-        "{} {}  {:.1}% backed ({:.1}% by matched claims, rest primary)",
+        "{} {}  {:.1}% backed ({:.1}% by matched claims, rest primary); without broad claims {:.1}% ({:.1}%)",
         o.paint(&report.subject, Style::Bold),
         o.paint(short(&report.snapshot), Style::Dim),
         report.ratio * 100.0,
-        report.evidence_ratio * 100.0
+        report.evidence_ratio * 100.0,
+        report.narrow_ratio * 100.0,
+        report.narrow_evidence_ratio * 100.0
     );
     if report.working_differs {
         warn_line!(
@@ -553,13 +570,21 @@ fn run_coverage(ctx: &Ctx, target: &str, min: Option<f64>, lines: bool) -> Resul
         );
     }
     say!(
-        "  matched {}  primary {}  stale {}  broken {}  uncovered {}  (non-blank lines)",
+        "  matched {}  primary {}  stale {}  broken {}  uncovered {}  (non-blank lines){}",
         c.matched,
         c.primary,
         c.stale,
         c.broken,
-        c.uncovered
+        c.uncovered,
+        if c.excluded > 0 {
+            format!("  excluded by scope {}", c.excluded)
+        } else {
+            String::new()
+        }
     );
+    for b in &report.broad {
+        print_broad(*o, b);
+    }
     if lines {
         let text = project.snapshot_text(&report.snapshot)?;
         for (i, (line, status)) in text.lines().zip(&report.lines).enumerate() {
@@ -605,7 +630,362 @@ fn run_coverage(ctx: &Ctx, target: &str, min: Option<f64>, lines: bool) -> Resul
     for p in &report.unresolved_primary {
         say!("  {} primary {p}", o.paint("unresolved", Style::Yellow));
     }
+    for p in &report.unresolved_scope {
+        say!("  {} scope {p}", o.paint("unresolved", Style::Yellow));
+    }
     Ok(if below { EXIT_PROBLEMS } else { 0 })
+}
+
+fn pct(x: f64) -> String {
+    format!("{:5.1}%", x * 100.0)
+}
+
+fn print_broad(o: Out, b: &evidence_core::BroadRange) {
+    let at = b
+        .path
+        .as_deref()
+        .map_or_else(|| b.target.clone(), |p| format!("{}:{p}", b.target));
+    let label = if b.acknowledged.is_some() {
+        o.paint("broad (acknowledged)", Style::Dim)
+    } else {
+        o.paint("broad", Style::Yellow)
+    };
+    say!(
+        "  {label} {}  {at}#{}-{}  {}/{} lines ({:.0}%){}",
+        b.claim,
+        b.lines.0,
+        b.lines.1,
+        b.selected,
+        b.total,
+        b.share * 100.0,
+        b.acknowledged
+            .as_deref()
+            .map_or_else(String::new, |r| format!("  \u{2014} {r}"))
+    );
+}
+
+/// Subject coverage of several pairs: one row each and the total.
+fn run_coverages(ctx: &Ctx, targets: &[String], min: Option<f64>) -> Result<i32> {
+    let project = ctx.project()?;
+    let mut reports = Vec::new();
+    let mut skipped = Vec::new();
+    for pair in project.select(targets)? {
+        match project.coverage(pair) {
+            Ok(r) => reports.push(r),
+            Err(e) => skipped.push(serde_json::json!({ "id": pair.id, "reason": e.to_string() })),
+        }
+    }
+    let mut total = evidence_core::CoverageCounts::default();
+    let (mut n_backed, mut n_matched) = (0.0, 0.0);
+    for r in &reports {
+        let c = &r.counts;
+        total.matched += c.matched;
+        total.primary += c.primary;
+        total.stale += c.stale;
+        total.broken += c.broken;
+        total.uncovered += c.uncovered;
+        total.excluded += c.excluded;
+        #[allow(clippy::cast_precision_loss)]
+        let t = c.total() as f64;
+        n_backed += r.narrow_ratio * t;
+        n_matched += r.narrow_evidence_ratio * t;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let all = total.total() as f64;
+    let ratio = |n: f64| if all == 0.0 { 0.0 } else { n / all };
+    #[allow(clippy::cast_precision_loss)]
+    let backed = ratio((total.matched + total.primary) as f64);
+    #[allow(clippy::cast_precision_loss)]
+    let evidence = ratio(total.matched as f64);
+    let below = min.is_some_and(|m| backed * 100.0 < m);
+    let broad: usize = reports.iter().map(|r| r.broad.len()).sum();
+    if ctx.out.json {
+        #[derive(serde::Serialize)]
+        struct Summary<'a> {
+            reports: &'a [evidence_core::CoverageReport],
+            skipped: &'a [serde_json::Value],
+            counts: &'a evidence_core::CoverageCounts,
+            ratio: f64,
+            evidence_ratio: f64,
+            narrow_ratio: f64,
+            narrow_evidence_ratio: f64,
+            broad: usize,
+        }
+        ctx.out.emit(
+            "coverage",
+            &Summary {
+                reports: &reports,
+                skipped: &skipped,
+                counts: &total,
+                ratio: backed,
+                evidence_ratio: evidence,
+                narrow_ratio: ratio(n_backed),
+                narrow_evidence_ratio: ratio(n_matched),
+                broad,
+            },
+        )?;
+        return Ok(if below { EXIT_PROBLEMS } else { 0 });
+    }
+    let o = &ctx.out;
+    say!(
+        "{}",
+        o.paint(
+            "backed   by-claims  narrow   lines  broad  pair",
+            Style::Dim
+        )
+    );
+    for r in &reports {
+        say!(
+            "{}   {}    {}  {:>6}  {:>5}  {}",
+            pct(r.ratio),
+            pct(r.evidence_ratio),
+            pct(r.narrow_ratio),
+            r.counts.total(),
+            r.broad.len(),
+            r.id
+        );
+    }
+    say!(
+        "{}   {}    {}  {:>6}  {:>5}  {}",
+        pct(backed),
+        pct(evidence),
+        pct(ratio(n_backed)),
+        total.total(),
+        broad,
+        o.paint(format!("total ({} pairs)", reports.len()), Style::Bold)
+    );
+    if !skipped.is_empty() {
+        say!(
+            "{}",
+            o.paint(format!("  skipped {} pair(s) without a text subject (directories, binary files); see --used", skipped.len()), Style::Dim)
+        );
+    }
+    Ok(if below { EXIT_PROBLEMS } else { 0 })
+}
+
+/// Usage coverage of the targets.
+fn run_usage(
+    ctx: &Ctx,
+    targets: &[String],
+    from: &[String],
+    min: Option<f64>,
+    lines: bool,
+    files: bool,
+) -> Result<i32> {
+    let project = ctx.project()?;
+    let located = project.locate(targets)?;
+    let from_pairs = if from.is_empty() {
+        None
+    } else {
+        Some(project.select(from)?)
+    };
+    let results = project.usage(&located, from_pairs.as_deref());
+    let mut reports = Vec::new();
+    let mut skipped = Vec::new();
+    for (id, r) in results {
+        match r {
+            Ok(r) => reports.push(r),
+            Err(e) => skipped.push(serde_json::json!({ "id": id, "reason": e.to_string() })),
+        }
+    }
+    let mut total = evidence_core::UsageCounts::default();
+    let mut narrow = 0usize;
+    for r in &reports {
+        let c = &r.counts;
+        total.matched += c.matched;
+        total.stale += c.stale;
+        total.broken += c.broken;
+        total.unused += c.unused;
+        total.excluded += c.excluded;
+        narrow += r.files.iter().map(|f| f.narrow).sum::<usize>();
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let narrow_ratio = if total.in_scope() == 0 {
+        0.0
+    } else {
+        narrow as f64 / total.in_scope() as f64
+    };
+    let below = min.is_some_and(|m| total.ratio() * 100.0 < m);
+    let broad: usize = reports.iter().map(|r| r.broad.len()).sum();
+    if ctx.out.json {
+        #[derive(serde::Serialize)]
+        struct Summary<'a> {
+            reports: &'a [evidence_core::UsageReport],
+            skipped: &'a [serde_json::Value],
+            counts: &'a evidence_core::UsageCounts,
+            ratio: f64,
+            matched_ratio: f64,
+            narrow_ratio: f64,
+            broad: usize,
+        }
+        ctx.out.emit(
+            "usage",
+            &Summary {
+                reports: &reports,
+                skipped: &skipped,
+                counts: &total,
+                ratio: total.ratio(),
+                matched_ratio: total.matched_ratio(),
+                narrow_ratio,
+                broad,
+            },
+        )?;
+        return Ok(if below { EXIT_PROBLEMS } else { 0 });
+    }
+    let o = &ctx.out;
+    say!(
+        "{}",
+        o.paint(
+            "used     matched  narrow   in-scope  excluded  broad  target",
+            Style::Dim
+        )
+    );
+    let row = |c: &evidence_core::UsageCounts, n: f64, b: usize, name: String| {
+        say!(
+            "{}   {}   {}  {:>8}  {:>8}  {:>5}  {name}",
+            pct(c.ratio()),
+            pct(c.matched_ratio()),
+            pct(n),
+            c.in_scope(),
+            c.excluded,
+            b
+        );
+    };
+    for r in &reports {
+        let name = r
+            .within
+            .as_deref()
+            .map_or_else(|| r.id.clone(), |w| format!("{}:{w}", r.id));
+        row(&r.counts, r.narrow_ratio, r.broad.len(), name);
+        if files || r.within.is_some() && r.files.len() > 1 {
+            for f in &r.files {
+                let b = r.broad.iter().filter(|x| x.path == f.path).count();
+                row(
+                    &f.counts,
+                    f.narrow_ratio,
+                    b,
+                    format!("  {}", f.path.as_deref().unwrap_or("")),
+                );
+            }
+        }
+    }
+    if reports.len() > 1 {
+        row(
+            &total,
+            narrow_ratio,
+            broad,
+            o.paint(format!("total ({} pairs)", reports.len()), Style::Bold),
+        );
+    }
+    for r in &reports {
+        for b in &r.broad {
+            print_broad(*o, b);
+        }
+        for s in &r.skipped {
+            say!(
+                "  {} {}:{}  {}{}",
+                o.paint("skipped", Style::Dim),
+                r.id,
+                s.path.as_deref().unwrap_or(""),
+                s.reason,
+                if s.claims.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (referenced by {})", s.claims.join(", "))
+                }
+            );
+        }
+        for u in &r.unresolved {
+            say!("  {} {u}", o.paint("unresolved", Style::Yellow));
+        }
+        if !r.other_revision.is_empty() {
+            say!(
+                "  {} {} claim(s) reference another revision of {} (not counted)",
+                o.paint("note", Style::Dim),
+                r.other_revision.len(),
+                r.id
+            );
+        }
+    }
+    for s in &skipped {
+        say!("  {} {}", o.paint("skipped", Style::Dim), s);
+    }
+    if lines {
+        if let ([r], true) = (reports.as_slice(), true)
+            && let [f] = r.files.as_slice()
+        {
+            let text = project.usage_text(&r.id, f.path.as_deref())?;
+            for (i, (line, status)) in text.lines().zip(&f.lines).enumerate() {
+                say!("{} {:>5} | {line}", o.usage_status(*status), i + 1);
+            }
+        } else {
+            warn_line!("--lines needs exactly one file");
+        }
+    }
+    Ok(if below { EXIT_PROBLEMS } else { 0 })
+}
+
+/// Broad claim ranges of the targets and broad references to them.
+fn run_broad(ctx: &Ctx, targets: &[String]) -> Result<i32> {
+    let project = ctx.project()?;
+    let pairs = project.select(targets)?;
+    let mut found: Vec<evidence_core::BroadRange> = Vec::new();
+    for pair in &pairs {
+        if let Ok(r) = project.coverage(pair) {
+            found.extend(r.broad);
+        }
+    }
+    let located: Vec<_> = pairs.iter().map(|p| (*p, None)).collect();
+    for (_, r) in project.usage(&located, None) {
+        if let Ok(r) = r {
+            found.extend(r.broad);
+        }
+    }
+    let open = found.iter().filter(|b| b.acknowledged.is_none()).count();
+    let cfg = project.coverage_config();
+    if ctx.out.json {
+        #[derive(serde::Serialize)]
+        struct Summary<'a> {
+            broad_share: f64,
+            broad_min_lines: usize,
+            broad: &'a [evidence_core::BroadRange],
+            unacknowledged: usize,
+        }
+        ctx.out.emit(
+            "broad",
+            &Summary {
+                broad_share: cfg
+                    .broad_share
+                    .unwrap_or(evidence_core::format::CoverageConfig::DEFAULT_BROAD_SHARE),
+                broad_min_lines: cfg
+                    .broad_min_lines
+                    .unwrap_or(evidence_core::format::CoverageConfig::DEFAULT_BROAD_MIN_LINES),
+                broad: &found,
+                unacknowledged: open,
+            },
+        )?;
+        return Ok(if open > 0 { EXIT_PROBLEMS } else { 0 });
+    }
+    let o = &ctx.out;
+    say!(
+        "{}",
+        o.paint(
+            format!(
+                "broad: a range over {:.0}% of the counted lines of a file of at least {} lines",
+                cfg.broad_share
+                    .unwrap_or(evidence_core::format::CoverageConfig::DEFAULT_BROAD_SHARE)
+                    * 100.0,
+                cfg.broad_min_lines
+                    .unwrap_or(evidence_core::format::CoverageConfig::DEFAULT_BROAD_MIN_LINES)
+            ),
+            Style::Dim
+        )
+    );
+    for b in &found {
+        print_broad(*o, b);
+    }
+    say!("{} broad range(s), {open} not acknowledged", found.len());
+    Ok(if open > 0 { EXIT_PROBLEMS } else { 0 })
 }
 
 fn run_requirements(

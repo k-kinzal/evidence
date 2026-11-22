@@ -2,8 +2,8 @@
 
 use std::io::{IsTerminal, Write};
 
-use evidence_core::LineStatus;
 use evidence_core::{ClaimHealth, Health};
+use evidence_core::{LineStatus, UsageStatus};
 use serde::Serialize;
 
 use crate::cli::ColorChoice;
@@ -86,6 +86,18 @@ impl Out {
             LineStatus::Stale => Style::Yellow,
             LineStatus::Broken => Style::Red,
             LineStatus::Uncovered => Style::Magenta,
+            LineStatus::Excluded => Style::Dim,
+        };
+        self.paint(format!("{:<9}", s.as_str()), style)
+    }
+
+    pub(crate) fn usage_status(self, s: UsageStatus) -> String {
+        let style = match s {
+            UsageStatus::Matched => Style::Green,
+            UsageStatus::Stale => Style::Yellow,
+            UsageStatus::Broken => Style::Red,
+            UsageStatus::Unused => Style::Magenta,
+            UsageStatus::Excluded => Style::Dim,
         };
         self.paint(format!("{:<9}", s.as_str()), style)
     }

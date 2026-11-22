@@ -99,5 +99,6 @@ pub(crate) fn line(s: LineStatus) -> Hsla {
         LineStatus::Stale => amber(),
         LineStatus::Broken => red(),
         LineStatus::Uncovered => purple(),
+        LineStatus::Excluded => muted(),
     }
 }

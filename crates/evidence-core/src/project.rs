@@ -10,7 +10,7 @@ use jiff::Timestamp;
 use serde::Serialize;
 
 use crate::add::{self, AddOptions};
-use crate::coverage::{self, CoverageReport, RequirementCoverage};
+use crate::coverage::{self, CoverageReport, RequirementCoverage, UsageReport};
 use crate::error::{Error, Result};
 use crate::format::{Diagnostic, ObjectId};
 use crate::graph::{self, TreeNode};
@@ -170,9 +170,84 @@ impl Project {
         PairView::new(&self.ws, pair, self.now())
     }
 
+    /// Resolves ids or paths to pairs, each with the path inside a directory subject a path
+    /// target names (`spec/proof.trion` inside the subject `spec`). No targets selects every
+    /// pair.
+    pub fn locate(&self, targets: &[String]) -> Result<Vec<(&Pair, Option<String>)>> {
+        let mut out: Vec<(&Pair, Option<String>)> = Vec::new();
+        for target in targets {
+            match self
+                .ws
+                .select(&self.layout, &self.cwd, std::slice::from_ref(target))
+            {
+                Ok(pairs) => out.extend(pairs.into_iter().map(|p| (p, None))),
+                Err(Error::NotFound(_)) => {
+                    let path = self.cwd.join(target);
+                    let path = std::fs::canonicalize(&path).unwrap_or(path);
+                    let inside = self.ws.pairs().iter().find_map(|p| {
+                        let rel = path.strip_prefix(&p.subject_path).ok()?;
+                        (p.subject_path.is_dir() && !rel.as_os_str().is_empty())
+                            .then(|| (p, rel.to_string_lossy().replace('\\', "/")))
+                    });
+                    match inside {
+                        Some((p, rel)) => out.push((p, Some(rel))),
+                        None => return Err(Error::NotFound(target.clone())),
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if targets.is_empty() {
+            out.extend(self.ws.pairs().iter().map(|p| (p, None)));
+        }
+        Ok(out)
+    }
+
+    /// Usage coverage: for each target (a pair, optionally limited to a path inside its
+    /// directory subject), how much of its current version the references of claims select.
+    /// Only claims of `from` count (every pair's when `None`); `[[scope]]` of each target
+    /// says which part counts.
+    pub fn usage(
+        &self,
+        targets: &[(&Pair, Option<String>)],
+        from: Option<&[&Pair]>,
+    ) -> Vec<(String, Result<UsageReport>)> {
+        let uses = coverage::collect_uses(&self.ws, from);
+        targets
+            .iter()
+            .map(|(p, within)| {
+                let r = coverage::usage(
+                    &self.ws,
+                    p,
+                    within.as_deref(),
+                    &uses,
+                    self.coverage_config(),
+                );
+                (p.id.clone(), r)
+            })
+            .collect()
+    }
+
+    /// The text of a file of a pair's current version (`path` inside a directory subject).
+    pub fn usage_text(&self, id: &str, path: Option<&str>) -> Result<String> {
+        let pair = self.find(id)?;
+        let resolver = crate::snapshot::Resolver::new(&self.ws);
+        let version = resolver
+            .current(pair)
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+        resolver
+            .text(&version, path)
+            .map_err(|e| Error::Invalid(e.to_string()))
+    }
+
+    /// The `[coverage]` configuration.
+    pub fn coverage_config(&self) -> &crate::format::CoverageConfig {
+        &self.layout.config().config.coverage
+    }
+
     /// Line coverage of a pair's current version by its claims and primary ranges.
     pub fn coverage(&self, pair: &Pair) -> Result<CoverageReport> {
-        coverage::coverage(&self.ws, pair)
+        coverage::coverage(&self.ws, pair, self.coverage_config())
     }
 
     /// Which requirements of a pair are satisfied, by explicit `satisfies` references: in

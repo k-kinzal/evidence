@@ -71,7 +71,14 @@ impl LoadedConfig {
                 figment = figment.merge(Toml::file_exact(path));
             }
         }
-        let sections = ["user", "execution", "store", "discovery", "index"];
+        let sections = [
+            "user",
+            "execution",
+            "store",
+            "discovery",
+            "index",
+            "coverage",
+        ];
         figment = figment.merge(Env::prefixed("EVIDENCE_").split("__").filter(move |k| {
             let first = k
                 .as_str()

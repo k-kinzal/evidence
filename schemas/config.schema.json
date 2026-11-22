@@ -1,5 +1,25 @@
 {
   "$defs": {
+    "CoverageConfig": {
+      "additionalProperties": false,
+      "description": "`[coverage]`\n\nA claim whose range, or a reference whose selection, takes more than `broad_share` of a\nfile's non-blank lines is *broad*: one claim backing a whole document, or one reference\nusing a whole document, raises coverage without saying which part supports what. Broad\nclaims and references are reported, and coverage is also given without them (`narrow`).",
+      "properties": {
+        "broad_min_lines": {
+          "description": "Files with fewer non-blank lines are never broad (selecting all of a short file is\nprecise). Defaults to `40`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "broad_share": {
+          "description": "Share (0.0–1.0) of a file's non-blank lines above which a range is broad. Defaults to\n`0.5`.",
+          "format": "double",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
     "DiscoveryConfig": {
       "additionalProperties": false,
       "description": "`[discovery]`",
@@ -75,6 +95,11 @@
   "additionalProperties": false,
   "description": "Configuration of the `evidence` command (global, project, or project-local layer).",
   "properties": {
+    "coverage": {
+      "$ref": "#/$defs/CoverageConfig",
+      "default": {},
+      "description": "Coverage: when a claim or a reference is too broad to count as precise evidence."
+    },
     "discovery": {
       "$ref": "#/$defs/DiscoveryConfig",
       "default": {},

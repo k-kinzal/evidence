@@ -1,6 +1,6 @@
 //! Evidence: provenance, freshness, and coverage for a body of knowledge built from files.
 //!
-//! This crate is everything the `evidence` CLI and the `evidence-ui` desktop app do, behind
+//! This crate is everything the `evidence` CLI and `evidence-wiki` do, behind
 //! one entry point, [`Project`]. Open a project once; then ask it ([`Project::statuses`],
 //! [`Project::coverage`], [`Project::tree`], [`Project::search`], …) or change it
 //! ([`Project::update`], [`Project::pin`], [`Project::migrate`], [`Project::add`],
@@ -59,8 +59,9 @@ mod workspace;
 
 pub use add::{AddOptions, Template};
 pub use coverage::{
-    CoverageCounts, CoverageReport, CoverageSegment, LineStatus, RequirementCoverage,
-    RequirementState, RequirementStatus, SatisfyingClaim,
+    BroadRange, CoverageCounts, CoverageReport, CoverageSegment, LineStatus, RequirementCoverage,
+    RequirementState, RequirementStatus, SatisfyingClaim, SkippedFile, UsageCounts, UsageFile,
+    UsageReport, UsageSegment, UsageStatus,
 };
 pub use error::{Error, Result};
 pub use graph::TreeNode;

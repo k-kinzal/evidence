@@ -52,6 +52,11 @@
       "additionalProperties": false,
       "description": "A claim: a range of the subject and the references it relates to.",
       "properties": {
+        "broad": {
+          "description": "Why this claim's range, or a range it references, is broad on purpose (`[coverage]`\nof the configuration says when a range is broad). Acknowledged broad ranges are still\nreported and still left out of narrow coverage.",
+          "minLength": 1,
+          "type": "string"
+        },
         "evidence": {
           "description": "References the range relates to (at least one).",
           "items": {
@@ -164,6 +169,13 @@
           "$ref": "#/$defs/SchemaSpec",
           "description": "Schema every new version of the subject must conform to."
         },
+        "scope": {
+          "description": "The parts of the subject that coverage counts. Without an including entry the whole\nsubject counts; entries with `exclude = true` then remove parts (front matter, chapters\nthat nothing depends on).",
+          "items": {
+            "$ref": "#/$defs/Scope"
+          },
+          "type": "array"
+        },
         "state": {
           "$ref": "#/$defs/State",
           "description": "Tool-managed state. Never edit by hand."
@@ -193,6 +205,10 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "wiki": {
+          "$ref": "#/$defs/WikiPage",
+          "description": "How the subject appears in a wiki (`evidence-wiki`): other names, categories, and the\nkind of page. Evidence itself does not read it."
         }
       },
       "required": [
@@ -441,6 +457,26 @@
         {
           "const": "claims",
           "description": "The complete set of claims of the production's namespace (`{claims}`).",
+          "type": "string"
+        }
+      ]
+    },
+    "PageKind": {
+      "description": "The kind of a wiki page.",
+      "oneOf": [
+        {
+          "const": "article",
+          "description": "An ordinary page.",
+          "type": "string"
+        },
+        {
+          "const": "category",
+          "description": "A category page: lists the pages that name it in `categories`.",
+          "type": "string"
+        },
+        {
+          "const": "term",
+          "description": "A term (glossary) page: explains a word used across several pages.",
           "type": "string"
         }
       ]
@@ -782,6 +818,30 @@
       ],
       "type": "object"
     },
+    "Scope": {
+      "additionalProperties": false,
+      "description": "A part of the subject that coverage counts, or (with `exclude`) leaves out (`[[scope]]`).",
+      "properties": {
+        "exclude": {
+          "description": "Leave the part out of coverage instead of counting it.",
+          "type": "boolean"
+        },
+        "note": {
+          "description": "Free-form note (why the part counts or does not).",
+          "type": "string"
+        },
+        "path": {
+          "description": "For directory subjects: a file, or a directory (every file under it), inside the\nsubject. Without it the entry is about every file.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "select": {
+          "$ref": "#/$defs/Selector",
+          "description": "The range of each file the entry is about. Without it, whole files."
+        }
+      },
+      "type": "object"
+    },
     "Selector": {
       "description": "Names a part of a document.",
       "oneOf": [
@@ -912,6 +972,35 @@
       "const": true,
       "description": "Must be `true`.",
       "type": "boolean"
+    },
+    "WikiPage": {
+      "additionalProperties": false,
+      "description": "How a subject appears in a wiki (`[wiki]`).\n\nEvery pair is a page of the wiki. This table only adds what the evidence file does not say\nalready: the title, description, and tags are the evidence file's own.",
+      "properties": {
+        "aliases": {
+          "description": "Other names the page is found and linked by (`[[alias]]` links to it).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "categories": {
+          "description": "Categories the page belongs to. Each names a category page by its title, an alias, or\nits id, the same way a `[[link]]` does; a category without a page is *wanted*.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "hidden": {
+          "description": "Leave the page out of navigation, listings, and search (it can still be linked).",
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/PageKind",
+          "description": "What the page is. Defaults to `article`."
+        }
+      },
+      "type": "object"
     }
   },
   "$id": "https://evidence-cli.github.io/schemas/evid.schema.json",

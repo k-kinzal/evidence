@@ -1,6 +1,6 @@
 [package]
 name = "evidence-core"
-description = "Evidence: provenance, freshness, and coverage of everything you collect, derive, and write (library behind the CLI and the desktop app)"
+description = "Evidence: provenance, freshness, and coverage of everything you collect, derive, and write (library behind the CLI and the wiki)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
