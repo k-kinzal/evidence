@@ -251,7 +251,7 @@ pub struct PairStatus {
     /// Claims (hand-written and generated).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub claims: Vec<ClaimStatus>,
-    /// The evidence file is format version 1 (read-only until migrated).
+    /// The evidence file uses a legacy format (read-only until migrated).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub legacy: bool,
 }
@@ -301,7 +301,7 @@ pub(crate) fn status(ws: &Workspace, pair: &Pair, now: Timestamp) -> PairStatus 
         out.notices.push(Notice {
             code: "legacy-format",
             detail: None,
-            message: "format version 1: run `evidence migrate` before updating or pinning".into(),
+            message: "legacy format: run `evidence migrate` before updating or pinning".into(),
         });
     }
 

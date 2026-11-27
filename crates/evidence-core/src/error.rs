@@ -48,8 +48,8 @@ pub enum Error {
     /// A file changed while it was being updated; nothing was recorded.
     #[error("{0}")]
     Conflict(String),
-    /// The evidence file is format version 1 and must be migrated first.
-    #[error("{0} is format version 1; run `evidence migrate` first")]
+    /// The evidence file must be migrated before updating.
+    #[error("{0} uses a legacy format; run `evidence migrate` first")]
     Legacy(String),
     /// The SQLite index failed (search falls back to scanning files).
     #[cfg(feature = "index")]

@@ -69,6 +69,9 @@ inputs, claim references, and members are different relations: only inputs cause
 
 Version 1 evidence files are read but never written; convert them with `evidence migrate`
 (see [docs/migration.md](docs/migration.md)).
+The same command migrates older version 2 definitions with plaintext inline state. It
+backs up the original file and moves the state into the current project store. Reading
+and citation assessment also work before migration.
 
 Every command accepts `--json`. The output is an envelope `{"version": 2, "<key>": …}`
 (see [docs/cli.md](docs/cli.md#json-output)). Exit codes: `0` ok, `1` problems found
@@ -156,6 +159,20 @@ version per input ID. Encrypted directory snapshots are available through the lo
 Materialized working files and hand-written definitions are ordinary files. Add approved
 definitions and shared objects to Git, and keep private working files and definitions local.
 
+## Assess citations
+
+[`assess`](crates/assess) is a separate CLI for evaluating how well citations support
+claims. It sends the selected text to a Decision API and writes a `.asse` sidecar per
+target (`report.md.evid` → `report.md.asse`). `evidence show` reads those records.
+
+```sh
+cargo install --path crates/assess
+assess citation-correctness --provider ollama --model nimble 'report#recovery-time'
+```
+
+The [assess README](crates/assess/README.md) documents providers, batch behavior, and how to
+replay a recorded run.
+
 ## Wiki
 
 `evidence-wiki` turns a project into a wiki that agents write and keep up to date while
@@ -192,6 +209,7 @@ Each crate has a README describing its role.
 | [`span-select`](crates/span-select) | Line, Markdown heading, marker, and JSON Pointer selectors, re-anchoring, coverage. Generic |
 | [`evidence-core`](crates/evidence-core) | Everything Evidence does, behind one entry point (`Project`); file formats in `evidence_core::format`; optional SQLite search index (feature `index`) |
 | [`evidence-cli`](crates/evidence-cli) | The `evidence` binary |
+| [`assess`](crates/assess) | The `assess` binary for external citation assessment |
 | [`evidence-wiki`](crates/evidence-wiki) | The `evidence-wiki` binary: wiki server, static site, MCP, scheduled agents, and skills |
 | [`xtask`](xtask) | `cargo xtask schemas [--check]`, `cargo xtask vocabulary` |
 | [`fuzz`](fuzz) | Fuzz targets for the evidence file parser and selectors (nightly, separate workspace) |

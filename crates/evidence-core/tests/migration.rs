@@ -359,6 +359,50 @@ fn mg05_migration_is_idempotent_and_keeps_history() {
 }
 
 #[test]
+fn migrates_inline_version_two_state_without_reformatting_the_definition() {
+    let fx = Fx::new();
+    let definition = "# Keep this comment\nversion = 2\nid = 'note'\n";
+    let old = format!(
+        r#"{definition}
+# ---- Managed by `evidence`. Do not edit below this line. ----
+[state.pins.first]
+recorded_at = "2025-01-03T00:00:00Z"
+recorded_by = "alice"
+anchor = "an earlier selection"
+
+[state.pins.first.content]
+snapshot = "{SNAP_A}"
+fragment = "{SNAP_B}"
+"#
+    );
+    fx.write("note.md", "note\n");
+    fx.write("note.md.evid", &old);
+    let read = |fx: &Fx| {
+        let project = fx.project();
+        let pair = project.find("note").unwrap();
+        (pair.legacy, pair.file.state.clone().unwrap())
+    };
+    let (legacy, inline) = read(&fx);
+    assert!(legacy);
+    assert_eq!(inline.pins["first"].recorded_by.as_deref(), Some("alice"));
+    assert_eq!(
+        fx.migrate(&[], true).files[0].action,
+        MigrateAction::Migrated
+    );
+    assert_eq!(fx.read("note.md.evid"), old);
+    assert_eq!(
+        fx.migrate(&[], false).files[0].action,
+        MigrateAction::Migrated
+    );
+    assert_eq!(fx.read("note.md.evid"), definition);
+    assert_eq!(read(&fx), (false, inline));
+    assert_eq!(
+        fx.migrate(&[], false).files[0].action,
+        MigrateAction::Current
+    );
+}
+
+#[test]
 fn mg06_nothing_writes_version_1_files_implicitly() {
     let fx = Fx::new();
     v1_project(&fx);

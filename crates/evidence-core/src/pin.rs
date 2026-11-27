@@ -258,7 +258,7 @@ pub(crate) fn pin(
     }
     if let Some((legacy, _)) = selection.iter().find(|(p, _)| p.legacy) {
         return Err(Error::Invalid(format!(
-            "{} is format version 1; run `evidence migrate` before pinning",
+            "{} uses a legacy format; run `evidence migrate` before pinning",
             legacy.evid_rel
         )));
     }

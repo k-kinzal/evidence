@@ -15,11 +15,14 @@ use crate::format::evid::{
 };
 use crate::format::member::MemberFile;
 use crate::format::schema;
+use crate::format::state::State;
 use crate::format::template::{self, Placeholder};
 use crate::format::v1;
 
 /// Suffix of evidence files.
 pub(crate) const EVID_SUFFIX: &str = ".evid";
+const INLINE_STATE_MARKER: &str =
+    "\n# ---- Managed by `evidence`. Do not edit below this line. ----\n";
 
 /// Returns the subject path of an evidence file (`data.json.evid` → `data.json`).
 pub fn subject_path(evid_path: &Path) -> Option<PathBuf> {
@@ -51,6 +54,8 @@ pub struct Parsed {
     pub member: Option<MemberFile>,
     /// Set when the file is format version 1: the original, for migration.
     pub legacy: Option<Box<v1::EvidenceFile>>,
+    /// Whether the definition uses the older version 2 layout with inline state.
+    pub(crate) inline_state: bool,
     /// Problems found (errors and warnings).
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -66,6 +71,7 @@ impl Parsed {
             file: None,
             member: None,
             legacy: None,
+            inline_state: false,
             diagnostics,
         }
     }
@@ -105,7 +111,7 @@ pub fn parse(text: &str, path: &Path) -> Parsed {
         }
     };
     let lines = Lines { text, doc: &doc };
-    let json = match toml::from_str::<serde_json::Value>(text) {
+    let mut json = match toml::from_str::<serde_json::Value>(text) {
         Ok(json) => json,
         Err(e) => {
             return Parsed::only(vec![Diagnostic::error("toml", e.to_string()).in_file(path)]);
@@ -117,6 +123,7 @@ pub fn parse(text: &str, path: &Path) -> Parsed {
                 file: None,
                 member: Some(member),
                 legacy: None,
+                inline_state: false,
                 diagnostics: Vec::new(),
             };
         }
@@ -131,11 +138,42 @@ pub fn parse(text: &str, path: &Path) -> Parsed {
         return parse_v1(text, &json, &lines, path);
     }
 
-    // 1. JSON Schema validation of the whole document.
+    // Older version 2 definitions kept tool-managed state below a marker. The
+    // public definition must still pass the current schema on its own.
+    let definition = split_inline_state(text).filter(|_| {
+        json.get("version").and_then(serde_json::Value::as_u64) == Some(u64::from(FORMAT_VERSION))
+    });
+    let state = definition.and_then(|_| json.as_object_mut()?.remove("state"));
+    let inline_state = state.is_some();
+    // 1. JSON Schema validation of the public definition.
     let mut diagnostics = schema_errors(evid_validator(), &json, &lines, path);
     // 2. Typed deserialization.
-    let file = match toml::from_str::<EvidenceFile>(text) {
-        Ok(file) => Some(file),
+    let file = match toml::from_str::<EvidenceFile>(
+        definition.filter(|_| inline_state).unwrap_or(text),
+    ) {
+        Ok(mut file) => {
+            if let Some(state) = state {
+                match serde_json::from_value::<State>(state) {
+                    Ok(state) => {
+                        file.state = Some(state);
+                        diagnostics.push(lines.locate(
+                            Diagnostic::warning("legacy-inline-state", "inline state: run `evidence migrate` before updating or pinning").at_pointer("/state"), path
+                        ));
+                    }
+                    Err(error) => {
+                        diagnostics.push(
+                            lines.locate(
+                                Diagnostic::error("legacy-inline-state", error.to_string())
+                                    .at_pointer("/state"),
+                                path,
+                            ),
+                        );
+                        return Parsed::only(diagnostics);
+                    }
+                }
+            }
+            Some(file)
+        }
         Err(e) => {
             if diagnostics.is_empty() {
                 let line = e.span().map(|s| line_of(text, s.start));
@@ -157,6 +195,7 @@ pub fn parse(text: &str, path: &Path) -> Parsed {
         file,
         member: None,
         legacy: None,
+        inline_state,
         diagnostics,
     }
 }
@@ -198,8 +237,16 @@ fn parse_v1(text: &str, json: &serde_json::Value, lines: &Lines<'_>, path: &Path
         file: Some(converted.file),
         member: None,
         legacy: Some(Box::new(legacy)),
+        inline_state: false,
         diagnostics,
     }
+}
+
+/// The previous version 2 writer always put a single state table after this marker.
+pub(crate) fn split_inline_state(text: &str) -> Option<&str> {
+    let (definition, suffix) = text.split_once(INLINE_STATE_MARKER)?;
+    let tables = toml::from_str::<toml::Table>(suffix).ok()?;
+    (tables.len() == 1 && tables.contains_key("state")).then_some(definition)
 }
 
 fn schema_errors(

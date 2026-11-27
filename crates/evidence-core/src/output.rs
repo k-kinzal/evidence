@@ -7,6 +7,7 @@
 
 use serde::Serialize;
 
+use crate::assessment::AssessmentFile;
 use crate::status::{PairStatus, status};
 use crate::workspace::{Pair, Workspace};
 
@@ -27,6 +28,12 @@ pub struct PairView {
     pub definition: crate::format::EvidenceFile,
     /// Freshness.
     pub status: PairStatus,
+    /// The assessment record attached to this Evidence ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assessments: Option<AssessmentFile>,
+    /// A problem reading the assessment sidecar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assessment_problem: Option<String>,
     /// A produced subject's working file differs from the adopted version.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub working_differs: bool,
@@ -60,12 +67,18 @@ fn definition_with_state<S: serde::Serializer>(
 impl PairView {
     /// Builds the view of `pair`.
     pub(crate) fn new(ws: &Workspace, pair: &Pair, now: jiff::Timestamp) -> Self {
+        let (assessments, assessment_problem) = match AssessmentFile::read(pair) {
+            Ok(record) => (record, None),
+            Err(e) => (None, Some(e.to_string())),
+        };
         Self {
             id: pair.id.clone(),
             evid: pair.evid_rel.clone(),
             subject: pair.subject_rel.clone(),
             definition: pair.file.clone(),
             status: status(ws, pair, now),
+            assessments,
+            assessment_problem,
             working_differs: pair.file.content_mode() == crate::format::ContentMode::Produced
                 && pair
                     .file

@@ -11,6 +11,9 @@ use jiff::Timestamp;
 use serde::Serialize;
 
 use crate::add::{self, AddOptions};
+use crate::assessment::{
+    self, AssessmentArchive, AssessmentFile, AssessmentMethod, AssessmentResult, CapturedClaim,
+};
 use crate::coverage::{self, CoverageReport, RequirementCoverage, UsageReport};
 use crate::error::{Error, Result};
 use crate::format::{Diagnostic, ObjectId};
@@ -169,6 +172,34 @@ impl Project {
     /// Definition, state, status, and direct neighbors of a pair.
     pub fn show(&self, pair: &Pair) -> PairView {
         PairView::new(&self.ws, pair, self.now())
+    }
+
+    /// Reads the associated `.asse` record, if present.
+    pub fn assessment_file(&self, pair: &Pair) -> Result<Option<AssessmentFile>> {
+        AssessmentFile::read(pair)
+    }
+
+    /// Opens the original run linked from this pair's assessment record.
+    pub fn assessment_archive(&self, pair: &Pair, id: ObjectId) -> Result<AssessmentArchive> {
+        assessment::read_archive(&self.ws, pair, id)
+    }
+
+    /// Freezes the inputs for an external evaluation of `(evidence ID, claim ID)` targets.
+    pub fn capture_assessment_inputs(
+        &mut self,
+        targets: &[(String, String)],
+    ) -> Result<Vec<CapturedClaim>> {
+        assessment::capture(&self.layout, targets)
+    }
+
+    /// Stores an external assessment and attaches its results to their `.asse` sidecars.
+    pub fn record_assessment(
+        &mut self,
+        method: AssessmentMethod,
+        exchange: serde_json::Value,
+        results: Vec<AssessmentResult>,
+    ) -> Result<ObjectId> {
+        assessment::record(&self.layout, self.now(), method, exchange, results)
     }
 
     /// Resolves ids or paths to pairs, each with the path inside a directory subject a path

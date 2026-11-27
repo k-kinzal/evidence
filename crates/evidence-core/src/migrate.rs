@@ -91,7 +91,7 @@ impl MigrateReport {
 fn issues(diagnostics: &[Diagnostic]) -> Vec<MigrateIssue> {
     diagnostics
         .iter()
-        .filter(|d| d.code != "legacy-format")
+        .filter(|d| d.code != "legacy-format" && d.code != "legacy-inline-state")
         .map(|d| MigrateIssue {
             severity: d.severity,
             code: d.code.to_string(),
@@ -282,7 +282,7 @@ pub(crate) fn migrate(
             if let Some(id) = &r.id {
                 let mut event = Event::new(now, "migrate", "migrated");
                 event.message = Some(format!(
-                    "format version 1 -> 2 (backup: {})",
+                    "migrated definition (backup: {})",
                     layout.relative(&backup)
                 ));
                 history::append(layout, id, &event)?;
@@ -316,7 +316,7 @@ fn plan_pair(pair: &Pair) -> Planned {
         }]);
     };
     let parsed = document::parse(&text, &pair.evid_path);
-    if parsed.legacy.is_none() {
+    if parsed.legacy.is_none() && !parsed.inline_state {
         return Planned::Current;
     }
     let found = issues(&parsed.diagnostics);
@@ -326,6 +326,18 @@ fn plan_pair(pair: &Pair) -> Planned {
     let Some(file) = parsed.file else {
         return Planned::Blocked(found);
     };
+    if parsed.inline_state {
+        let Some(definition) = document::split_inline_state(&text) else {
+            return Planned::Blocked(found);
+        };
+        return Planned::Rewrite(Box::new(Rewrite {
+            path: pair.evid_path.clone(),
+            id: Some(pair.id.clone()),
+            text: format!("{}\n", definition.trim_end()),
+            state: file.state(),
+            issues: found,
+        }));
+    }
     match document::render(&file) {
         Ok(text) => Planned::Rewrite(Box::new(Rewrite {
             path: pair.evid_path.clone(),
@@ -370,7 +382,7 @@ fn plan_member(pair: &Pair, on_disk: &MemberOnDisk, parent: Option<&Pair>) -> Pl
             format!("its parent `{}` is not loaded", member.member_of),
         );
     };
-    if member.version != 1 && !parent.legacy {
+    if member.version != 1 {
         return Planned::Current;
     }
     let found: Vec<MigrateIssue> = issues(&on_disk_diagnostics(pair));

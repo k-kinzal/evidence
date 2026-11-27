@@ -60,7 +60,7 @@ pub(crate) enum Command {
     },
     /// Run productions (due and stale ones, or the given targets), or pin claims (--pin).
     Update(UpdateArgs),
-    /// Rewrite format version 1 evidence files as format version 2.
+    /// Migrate legacy definitions and move inline state to the project store.
     Migrate {
         /// Ids or paths (default: the whole project).
         targets: Vec<String>,

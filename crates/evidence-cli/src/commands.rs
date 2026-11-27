@@ -479,9 +479,7 @@ fn show_status(ctx: &Ctx, targets: &[String]) -> Result<i32> {
     say!("{} pairs: {}", list.len(), summary.join(", "));
     let legacy = list.iter().filter(|s| s.legacy).count();
     if legacy > 0 {
-        say!(
-            "  note [legacy-format] {legacy} pair(s) in format version 1 are read-only; run `evidence migrate`"
-        );
+        say!("  note [legacy-format] {legacy} pair(s) use a legacy format; run `evidence migrate`");
     }
     let pending = project.pending_adoptions();
     if pending > 0 {
@@ -1199,8 +1197,35 @@ fn show(ctx: &Ctx, target: &str) -> Result<i32> {
     say!("  subject:    {}", pair.subject_rel);
     say!("  evidence:   {}", pair.evid_rel);
     say!("  status:     {}", o.health(view.status.health).trim_end());
+    if let Some(file) = &view.assessments
+        && let Some(latest) = file.runs.last()
+    {
+        say!(
+            "  assessment: {} by {} at {} ({})",
+            latest.method.kind,
+            latest.method.evaluator,
+            latest.at,
+            latest.id
+        );
+        for result in &latest.results {
+            use evidence_core::AssessmentOutcome;
+            let outcome = match &result.outcome {
+                AssessmentOutcome::Assessed { value } => value.to_string(),
+                AssessmentOutcome::Refused => "refused".into(),
+                AssessmentOutcome::Failed { error } => format!("failed ({error})"),
+            };
+            say!(
+                "    {} @ {}: {outcome}",
+                result.target.claim,
+                result.target.statement.snapshot.short()
+            );
+        }
+    }
+    if let Some(problem) = &view.assessment_problem {
+        say!("  assessment: {problem}");
+    }
     if pair.legacy {
-        say!("  format:     version 1 (run `evidence migrate`)");
+        say!("  format:     legacy (run `evidence migrate`)");
     }
     for p in &f.productions {
         let writes: Vec<&str> = p

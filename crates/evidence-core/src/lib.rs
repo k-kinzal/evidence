@@ -29,6 +29,7 @@
 #![warn(missing_docs)]
 
 mod add;
+mod assessment;
 mod coverage;
 mod error;
 mod exec;
@@ -63,6 +64,10 @@ mod validate;
 mod workspace;
 
 pub use add::{AddOptions, Template};
+pub use assessment::{
+    AssessmentArchive, AssessmentFile, AssessmentInput, AssessmentMethod, AssessmentOutcome,
+    AssessmentResult, AssessmentRun, AssessmentTarget, CapturedClaim,
+};
 pub use coverage::{
     BroadRange, CoverageCounts, CoverageReport, CoverageSegment, LineStatus, RequirementCoverage,
     RequirementState, RequirementStatus, SatisfyingClaim, SkippedFile, UsageCounts, UsageFile,

@@ -36,8 +36,7 @@ pub struct Pair {
     pub outside_project: bool,
     /// Set when the pair is a member of a list (`member_of`).
     pub membership: Option<Membership>,
-    /// The evidence file is format version 1: readable, but it must be migrated before the
-    /// tool records anything in it.
+    /// The evidence file must be migrated before the tool updates its state.
     pub legacy: bool,
 }
 
@@ -292,7 +291,7 @@ impl Workspace {
             let (Some(file), Some(subject)) = (parsed.file.clone(), subject.clone()) else {
                 continue;
             };
-            let legacy = parsed.legacy.is_some();
+            let legacy = parsed.legacy.is_some() || parsed.inline_state;
             ws.insert(layout, &mut by_subject, path, file, subject, None, legacy);
         }
 
@@ -342,14 +341,13 @@ impl Workspace {
             let err = |code, msg: String| Diagnostic::error(code, msg).in_file(&rel);
             let parent = ws.get(&member.member_of);
             let parent_legacy = parent.is_some_and(|p| p.legacy);
+            let v1 = parent
+                .filter(|p| p.legacy)
+                .and_then(|p| document::read(&p.evid_path).legacy);
             // A version 1 parent's template was converted in memory; its version 1 members
             // are composed from the template as written.
-            let members = if parent_legacy {
-                parent.and_then(|p| {
-                    document::read(&p.evid_path)
-                        .legacy
-                        .and_then(|l| l.members.clone())
-                })
+            let members = if let Some(legacy) = &v1 {
+                legacy.members.clone()
             } else {
                 parent.and_then(|p| p.file.members.clone())
             };
@@ -379,7 +377,7 @@ impl Workspace {
                 ));
                 continue;
             };
-            let version = if parent_legacy { 1 } else { 2 };
+            let version = if v1.is_some() { 1 } else { 2 };
             let (file, diagnostics) = compose_file(&members, member, &known.fields, version);
             ws.diagnostics
                 .extend(diagnostics.into_iter().map(|d| d.in_file(&rel)));

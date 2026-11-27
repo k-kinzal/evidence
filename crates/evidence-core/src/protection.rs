@@ -199,6 +199,7 @@ pub(crate) fn read(layout: &Layout, lock: &LockFile, path: &Path) -> format::Par
     };
     if let Some(file) = &mut parsed.file {
         if parsed.legacy.is_none()
+            && !parsed.inline_state
             && let Ok(state) = unlock()
         {
             file.state = (!state.is_empty()).then_some(state);

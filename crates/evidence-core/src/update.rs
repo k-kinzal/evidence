@@ -247,7 +247,7 @@ pub(crate) fn update(
                 id: p.id.clone(),
                 code: "legacy-format".into(),
                 message: format!(
-                    "{} is format version 1; run `evidence migrate` first",
+                    "{} uses a legacy format; run `evidence migrate` first",
                     p.evid_rel
                 ),
             });

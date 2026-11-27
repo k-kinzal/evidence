@@ -70,8 +70,12 @@ fn referenced_snapshots(ws: &Workspace) -> HashSet<(ObjectId, Option<Storage>)> 
 /// Removes unreferenced objects. History references are kept unless `drop_history`.
 pub(crate) fn prune(layout: &Layout, drop_history: bool) -> Result<cas_fs::PruneReport> {
     let _lock = layout.lock()?;
+    crate::journal::recover(layout)?;
     let ws = Workspace::load(layout)?;
     let mut roots = referenced_snapshots(&ws);
+    for pair in ws.pairs() {
+        roots.extend(crate::assessment::roots(pair)?);
+    }
     if !drop_history {
         roots.extend(
             history::referenced_snapshots(layout)?

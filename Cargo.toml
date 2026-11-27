@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/assess",
     "crates/cas-fs",
     "crates/span-select",
     "crates/evidence-core",
@@ -11,6 +12,7 @@ members = [
 # Fuzz targets need nightly and libFuzzer: `cargo +nightly fuzz run <target>` (see fuzz/).
 exclude = ["fuzz"]
 default-members = [
+    "crates/assess",
     "crates/cas-fs",
     "crates/span-select",
     "crates/evidence-core",
