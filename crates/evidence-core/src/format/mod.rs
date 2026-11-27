@@ -26,7 +26,7 @@ pub use document::{Parsed, evid_path, parse, render, replace_state, subject_path
 pub use evid::{
     Action, Claim, ClaimSource, ContentMode, EvidenceFile, Format, Interval, LocatorValue, Output,
     PageKind, Primary, Production, RefVersion, Reference, ReferenceDetail, Requirement, SchemaSpec,
-    Scope, WikiPage,
+    Scope, StoragePolicy, WikiPage,
 };
 pub(crate) use member::{Entry, List, compose_file, entries};
 pub use member::{MemberFile, Members, OnRemoved};
@@ -34,5 +34,6 @@ pub use schema::{config_schema, evid_schema};
 pub use span_select::{LineRange, Selector};
 pub use state::{
     ContentRecord, FINGERPRINT_VERSION, FailedAttempt, InputVersion, MemberState, PinRecord,
-    PinnedContent, PinnedReference, ProtectedState, ReplayState, RunRecord, RunStatus, State,
+    PinnedContent, PinnedReference, ProtectedState, ReplayState, RunRecord, RunStatus,
+    SnapshotStorage, State,
 };

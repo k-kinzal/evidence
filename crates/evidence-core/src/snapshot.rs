@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use cas_fs::{ObjectId, ObjectKind, Store};
 
-use crate::format::{ContentMode, RefVersion, Reference, Selector};
+use crate::format::{ContentMode, RefVersion, Reference, Selector, SnapshotStorage};
 use crate::workspace::{Pair, Workspace};
 
 /// Paths never included in directory snapshots.
@@ -33,13 +33,14 @@ pub(crate) fn disk_snapshot(path: &Path) -> Option<ObjectId> {
 #[derive(Debug, Clone)]
 pub(crate) enum Version {
     /// A version in the object store (adopted content, a fixed revision).
-    Stored(ObjectId),
+    Stored(ObjectId, Option<SnapshotStorage>),
     /// An editable subject as captured from disk. A file's bytes are read once, so the
     /// snapshot id and every fragment come from the same bytes.
     Captured {
         snapshot: ObjectId,
         path: PathBuf,
         bytes: Option<Arc<Vec<u8>>>,
+        storage: SnapshotStorage,
     },
 }
 
@@ -47,7 +48,21 @@ impl Version {
     /// Snapshot id.
     pub(crate) fn snapshot(&self) -> ObjectId {
         match self {
-            Self::Stored(id) | Self::Captured { snapshot: id, .. } => *id,
+            Self::Stored(id, _) | Self::Captured { snapshot: id, .. } => *id,
+        }
+    }
+
+    pub(crate) fn storage(&self) -> Option<SnapshotStorage> {
+        match self {
+            Self::Stored(_, storage) => *storage,
+            Self::Captured { storage, .. } => Some(*storage),
+        }
+    }
+
+    pub(crate) fn store<'a>(&self, store: &'a Store) -> std::borrow::Cow<'a, Store> {
+        match self.storage() {
+            Some(storage) => std::borrow::Cow::Owned(store.scoped(storage.into())),
+            None => std::borrow::Cow::Borrowed(store),
         }
     }
 }
@@ -70,6 +85,9 @@ pub(crate) enum ResolveError {
     /// A fixed reference does not say which revision.
     #[error("the fixed revision is not specified")]
     RevisionUnspecified,
+    /// The requested snapshot policy conflicts with its dependencies.
+    #[error("{0}")]
+    StorageConflict(String),
     /// A file inside a directory version does not exist, or the version cannot be read.
     #[error("cannot read {0}")]
     Unreadable(String),
@@ -90,6 +108,7 @@ impl ResolveError {
             Self::NeverProduced(_) => "never-produced",
             Self::NotStored(_) => "revision-missing",
             Self::RevisionUnspecified => "revision-unspecified",
+            Self::StorageConflict(_) => "storage-conflict",
             Self::Unreadable(_) => "unreadable",
             Self::NotText(_) => "not-text",
             Self::Select(_) => "range-unresolvable",
@@ -129,9 +148,12 @@ impl<'a> Resolver<'a> {
                 else {
                     return Err(ResolveError::NeverProduced(pair.id.clone()));
                 };
-                self.stored(content.snapshot)
+                self.stored(content.snapshot, content.storage)
             }
-            ContentMode::Editable => capture(&pair.subject_path, &pair.subject_rel),
+            ContentMode::Editable => {
+                let storage = crate::storage_policy::editable(self, pair)?;
+                capture(&pair.subject_path, &pair.subject_rel, storage)
+            }
         }
     }
 
@@ -150,12 +172,43 @@ impl<'a> Resolver<'a> {
     }
 
     /// A stored version, if the store has it.
-    pub(crate) fn stored(&self, id: ObjectId) -> Result<Version, ResolveError> {
-        if self.store.contains(&id) {
-            Ok(Version::Stored(id))
+    pub(crate) fn stored(
+        &self,
+        id: ObjectId,
+        storage: Option<SnapshotStorage>,
+    ) -> Result<Version, ResolveError> {
+        let version = Version::Stored(id, storage);
+        if version.store(self.store).contains(&id) {
+            Ok(version)
         } else {
             Err(ResolveError::NotStored(id.short()))
         }
+    }
+
+    /// Fixed references name a digest, which can identify more than one physical copy.
+    /// Use a recorded class when possible. A digest with competing classes is conservative.
+    pub(crate) fn fixed(&self, pair: Option<&Pair>, id: ObjectId) -> Result<Version, ResolveError> {
+        let storage = pair.and_then(|p| p.file.state.as_ref()).and_then(|state| {
+            state
+                .content
+                .iter()
+                .filter(|c| c.snapshot == id)
+                .map(|c| c.storage)
+                .chain(
+                    state
+                        .pins
+                        .values()
+                        .filter(|p| p.content.snapshot == Some(id))
+                        .map(|p| p.content.storage),
+                )
+                .reduce(|a, b| if a == b { a } else { None })
+                .flatten()
+        });
+        let storage = storage.filter(|class| {
+            *class != SnapshotStorage::Plain
+                || !self.store.scoped(cas_fs::Storage::Encrypted).contains(&id)
+        });
+        self.stored(id, storage)
     }
 
     /// The version a reference resolves to.
@@ -168,7 +221,7 @@ impl<'a> Resolver<'a> {
                     .ok_or_else(|| ResolveError::UnknownEvidence(reference.id().to_owned()))?;
                 self.current(pair)
             }
-            RefVersion::Revision(Some(v)) => self.stored(v),
+            RefVersion::Revision(Some(v)) => self.fixed(self.ws.get(reference.id()), v),
             RefVersion::Revision(None) => Err(ResolveError::RevisionUnspecified),
         }
     }
@@ -218,15 +271,15 @@ impl<'a> Resolver<'a> {
     ) -> Result<Vec<u8>, ResolveError> {
         let path = path.filter(|p| !p.is_empty());
         match version {
-            Version::Stored(id) => {
-                let (kind, blob) = self
-                    .store
+            Version::Stored(id, _) => {
+                let store = version.store(self.store);
+                let (kind, blob) = store
                     .resolve(id, path.unwrap_or_default())
                     .map_err(|_| ResolveError::Unreadable(describe(id, path)))?;
                 if kind != ObjectKind::Blob {
                     return Err(ResolveError::Unreadable(describe(id, path)));
                 }
-                self.store
+                store
                     .read_blob(&blob)
                     .map_err(|_| ResolveError::Unreadable(describe(id, path)))
             }
@@ -246,8 +299,8 @@ impl<'a> Resolver<'a> {
     /// The id of the object at `path` inside `version`.
     fn object_at(&self, version: &Version, path: &str) -> Result<ObjectId, ResolveError> {
         match version {
-            Version::Stored(id) => self
-                .store
+            Version::Stored(id, _) => version
+                .store(self.store)
                 .resolve(id, path)
                 .map(|(_, o)| o)
                 .map_err(|_| ResolveError::Unreadable(describe(id, Some(path)))),
@@ -260,15 +313,17 @@ impl<'a> Resolver<'a> {
     }
 
     /// Stores a version in the object store (an editable subject is captured into it), and
-    /// returns its snapshot id. A captured file is stored from the bytes already read.
-    pub(crate) fn keep(&self, version: &Version) -> Result<ObjectId, cas_fs::Error> {
-        match version {
-            Version::Stored(id) => Ok(*id),
+    /// returns the stored version. A captured file is stored from the bytes already read.
+    pub(crate) fn keep(&self, version: &Version) -> Result<Version, cas_fs::Error> {
+        let store = version.store(self.store);
+        let id = match version {
+            Version::Stored(_, _) => return Ok(version.clone()),
             Version::Captured {
                 bytes: Some(bytes), ..
-            } => self.store.put_bytes(bytes),
-            Version::Captured { path, .. } => self.store.put_path_filtered(path, &snapshot_filter),
-        }
+            } => store.put_bytes(bytes)?,
+            Version::Captured { path, .. } => store.put_path_filtered(path, &snapshot_filter)?,
+        };
+        Ok(Version::Stored(id, version.storage()))
     }
 }
 
@@ -280,7 +335,11 @@ fn describe(id: &ObjectId, path: Option<&str>) -> String {
 }
 
 /// Captures an editable subject from disk.
-pub(crate) fn capture(path: &Path, label: &str) -> Result<Version, ResolveError> {
+pub(crate) fn capture(
+    path: &Path,
+    label: &str,
+    storage: SnapshotStorage,
+) -> Result<Version, ResolveError> {
     let meta =
         std::fs::metadata(path).map_err(|_| ResolveError::SubjectMissing(label.to_owned()))?;
     if meta.is_file() {
@@ -289,6 +348,7 @@ pub(crate) fn capture(path: &Path, label: &str) -> Result<Version, ResolveError>
             snapshot: ObjectId::of(&bytes),
             path: path.to_path_buf(),
             bytes: Some(Arc::new(bytes)),
+            storage,
         });
     }
     let snapshot = cas_fs::hash_path_filtered(path, &snapshot_filter)
@@ -297,6 +357,7 @@ pub(crate) fn capture(path: &Path, label: &str) -> Result<Version, ResolveError>
         snapshot,
         path: path.to_path_buf(),
         bytes: None,
+        storage,
     })
 }
 

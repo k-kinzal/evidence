@@ -19,16 +19,17 @@ use crate::error::{Error, Result};
 use crate::exec::{self, RunContext, RunInput};
 use crate::fingerprint;
 use crate::format::{
-    Claim, ContentRecord, FINGERPRINT_VERSION, FailedAttempt, InputVersion, Output, PinRecord,
-    Production, Reference, RunRecord, RunStatus, document,
+    Claim, ContentMode, ContentRecord, FINGERPRINT_VERSION, FailedAttempt, InputVersion, Output,
+    PinRecord, Production, Reference, RunRecord, RunStatus, document,
 };
 use crate::history::{self, Event, PinEvent};
 use crate::journal::{self, Transaction};
 use crate::layout::Layout;
 use crate::membership::{self, MemberAction, MemberChange};
 use crate::pin::{self, PinSource};
-use crate::snapshot::{ResolveError, Resolver, Version, disk_snapshot, snapshot_filter};
+use crate::snapshot::{ResolveError, Resolver, Version, capture, disk_snapshot, snapshot_filter};
 use crate::status::{member_changed, production_reasons};
+use crate::storage_policy;
 use crate::subject_schema;
 use crate::workspace::{Node, Pair, Workspace};
 
@@ -193,6 +194,7 @@ const RUN_CODES: &[&str] = &[
     "production-changed",
     "production-unverified",
     "input-changed",
+    "storage-changed",
     "output-missing",
     "modified",
     "member-changed",
@@ -550,7 +552,8 @@ struct Staged {
     run: String,
     tmp: PathBuf,
     /// The new subject (in `tmp`) and its snapshot.
-    output: Option<(PathBuf, ObjectId)>,
+    output: Option<Version>,
+    pinned_editable: Option<Version>,
     inputs: BTreeMap<String, InputVersion>,
     claims: Option<Vec<Claim>>,
     pins: BTreeMap<String, PinRecord>,
@@ -682,16 +685,16 @@ fn stage(
     // Inputs: the version each reference resolves to, stored, then materialized from the
     // store (INV 03, INV 08).
     let mut run_inputs = Vec::new();
-    let mut versions: BTreeMap<String, ObjectId> = BTreeMap::new();
+    let mut versions = BTreeMap::new();
     for input in &production.inputs {
         let name = input.name().to_owned();
         let version = resolver
             .version_of(input)
             .map_err(|e| format!("input `{name}`: {e}"))?;
-        let snapshot = resolver
+        let stored = resolver
             .keep(&version)
             .map_err(|e| format!("input `{name}`: {e}"))?;
-        let stored = Version::Stored(snapshot);
+        let snapshot = stored.snapshot();
         let fragment = resolver
             .fragment(&stored, input.path(), input.selector())
             .map_err(|e| format!("input `{name}`: {e}"))?;
@@ -699,7 +702,8 @@ fn stage(
         let dir = tmp.join("inputs").join(&name);
         std::fs::create_dir_all(&dir).map_err(|e| io(&dir, e))?;
         let path = dir.join(target_name);
-        store
+        stored
+            .store(store)
             .materialize(&snapshot, &path)
             .map_err(|e| format!("input `{name}`: {e}"))?;
         let path = match input.path() {
@@ -711,11 +715,12 @@ fn stage(
             InputVersion {
                 id: input.id().to_owned(),
                 snapshot,
+                storage: stored.storage(),
                 fragment,
                 fixed: input.is_fixed(),
             },
         );
-        versions.insert(name.clone(), snapshot);
+        versions.insert(name.clone(), stored);
         run_inputs.push(RunInput {
             id: input.id().to_owned(),
             name,
@@ -725,17 +730,68 @@ fn stage(
         });
     }
 
+    let supplied_version = |r: &Reference| {
+        production
+            .inputs
+            .iter()
+            .find(|i| i.id() == r.id() && !i.is_fixed())
+            .and_then(|i| versions.get(i.name()))
+    };
+    let replaces_claims = production
+        .writes_claims()
+        .then_some(production.name.as_str());
+    let mut deps = storage_policy::subject_dependencies(pair, replaces_claims, &mut |r| {
+        if let Some(version) = (!r.is_fixed()).then(|| supplied_version(r)).flatten() {
+            return version.storage();
+        }
+        storage_policy::reference_storage(&resolver, r)
+    });
+    for input in used.values() {
+        deps.add(&input.id, input.storage);
+    }
+    if production.writes_subject()
+        && production.uses_previous_subject()
+        && let Some(content) = pair.file.state.as_ref().and_then(|s| s.content.as_ref())
+        && content.storage != Some(crate::format::SnapshotStorage::Plain)
+    {
+        deps.add("previous subject", content.storage);
+    }
+    let preliminary_storage = deps.decide(&resolver, pair).map_err(|e| e.to_string())?;
+
     // The current version of the subject, materialized for `{subject}`.
     let subject_dir = tmp.join("subject");
     std::fs::create_dir_all(&subject_dir).map_err(|e| io(&subject_dir, e))?;
     let subject_copy = subject_dir.join(file_name(pair));
-    let current = match resolver.current(pair) {
-        Ok(v) => {
-            let id = resolver.keep(&v).map_err(|e| format!("subject: {e}"))?;
-            store
-                .materialize(&id, &subject_copy)
-                .map_err(|e| format!("subject: {e}"))?;
-            Some(id)
+    let current = match match pair.file.content_mode() {
+        ContentMode::Produced => resolver.current(pair),
+        ContentMode::Editable => {
+            capture(&pair.subject_path, &pair.subject_rel, preliminary_storage)
+        }
+    } {
+        Ok(version) => {
+            match &version {
+                Version::Captured {
+                    bytes: Some(bytes), ..
+                } => {
+                    std::fs::write(&subject_copy, bytes.as_slice())
+                        .map_err(|e| io(&subject_copy, e))?;
+                }
+                Version::Captured { path, .. } => {
+                    let id = store
+                        .put_path_filtered(path, &snapshot_filter)
+                        .map_err(|e| format!("subject: {e}"))?;
+                    store
+                        .materialize(&id, &subject_copy)
+                        .map_err(|e| format!("subject: {e}"))?;
+                }
+                Version::Stored(id, _) => {
+                    version
+                        .store(store)
+                        .materialize(id, &subject_copy)
+                        .map_err(|e| format!("subject: {e}"))?;
+                }
+            }
+            Some(version)
         }
         Err(ResolveError::NeverProduced(_) | ResolveError::SubjectMissing(_)) => None,
         Err(e) => return Err(format!("subject: {e}")),
@@ -750,14 +806,21 @@ fn stage(
         id: pair.id.clone(),
         root: layout.root().to_path_buf(),
         dir: pair.evid_dir().to_path_buf(),
-        subject: subject_copy,
+        subject: subject_copy.clone(),
         output: output.clone(),
         claims: claims_path.clone(),
         cache,
         context_file: tmp.join("context.json"),
         inputs: run_inputs,
     };
-    write_context(&ctx, pair, production, run, current, &state)?;
+    write_context(
+        &ctx,
+        pair,
+        production,
+        run,
+        current.as_ref().map(Version::snapshot),
+        &state,
+    )?;
     let timeout = layout.config().config.execution.timeout.map(|t| t.0);
     let action = production.action();
     let stdout_to = if production.writes_subject() {
@@ -767,8 +830,7 @@ fn stage(
     };
     exec::run_action(&ctx, &action, Some(stdout_to), timeout)?;
 
-    let mut new_subject = None;
-    if production.writes_subject() {
+    let output_snapshot = if production.writes_subject() {
         if !output.exists() {
             return Err(format!(
                 "`{}` succeeded but did not write {{output}} (use `stdout = true` to capture its output)",
@@ -792,24 +854,69 @@ fn stage(
             exec::run_action(&ctx, verify, None, timeout)
                 .map_err(|e| format!("verification failed: {e}"))?;
         }
-        let id = store
-            .put_path_filtered(&output, &snapshot_filter)
-            .map_err(|e| e.to_string())?;
-        new_subject = Some((output.clone(), id));
-    }
+        Some(cas_fs::hash_path_filtered(&output, &snapshot_filter).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
     let locator = exec::locator(&ctx, &action, timeout)?;
 
-    let mut claims = None;
-    let mut pins = BTreeMap::new();
-    if production.writes_claims() {
-        let subject = new_subject
-            .as_ref()
-            .map(|(_, id)| *id)
-            .or(current)
-            .ok_or_else(|| "claims need a subject, and it does not exist".to_owned())?;
+    let claims = if production.writes_claims() {
         let returned = read_claims(&claims_path, production)?;
         check_claims(pair, production, &returned)?;
-        let subject_version = Version::Stored(subject);
+        Some(returned)
+    } else {
+        None
+    };
+    let other_version = |r: &Reference| {
+        if r.is_fixed() {
+            resolver.version_of(r)
+        } else {
+            supplied_version(r)
+                .cloned()
+                .ok_or_else(|| ResolveError::UnknownEvidence(r.id().to_owned()))
+        }
+    };
+    let mut claim_versions = BTreeMap::new();
+    for reference in claims.iter().flatten().flat_map(|claim| &claim.evidence) {
+        if reference.id() != pair.id || reference.is_fixed() {
+            let version = claim_versions
+                .entry((reference.id(), reference.version()))
+                .or_insert_with(|| other_version(reference));
+            deps.add(
+                reference.id(),
+                version.as_ref().ok().and_then(Version::storage),
+            );
+        }
+    }
+    let storage = deps.decide(&resolver, pair).map_err(|e| e.to_string())?;
+    let new_subject = output_snapshot.map(|snapshot| Version::Captured {
+        snapshot,
+        path: output,
+        bytes: None,
+        storage,
+    });
+    let mut pinned_editable = None;
+    let mut pins = BTreeMap::new();
+    if let Some(returned) = &claims {
+        let subject_version = new_subject
+            .clone()
+            .or(current)
+            .ok_or_else(|| "claims need a subject, and it does not exist".to_owned())?;
+        let subject_version = match subject_version {
+            Version::Captured {
+                snapshot, bytes, ..
+            } if new_subject.is_none() => {
+                let captured = Version::Captured {
+                    snapshot,
+                    path: subject_copy,
+                    bytes,
+                    storage,
+                };
+                pinned_editable = Some(captured.clone());
+                captured
+            }
+            v => v,
+        };
         let text = resolver
             .text(&subject_version, None)
             .map_err(|e| format!("claims: subject: {e}"))?;
@@ -820,21 +927,15 @@ fn stage(
             run: Some(run),
         };
         let mut problems = Vec::new();
-        for claim in &returned {
+        for claim in returned {
             let version_of = |r: &Reference| -> std::result::Result<Version, ResolveError> {
-                if r.is_fixed() {
-                    return resolver.version_of(r);
-                }
-                if r.id() == pair.id {
+                if r.id() == pair.id && !r.is_fixed() {
                     return Ok(subject_version.clone());
                 }
-                production
-                    .inputs
-                    .iter()
-                    .find(|i| i.id() == r.id() && !i.is_fixed())
-                    .and_then(|i| versions.get(i.name()))
-                    .map(|v| Version::Stored(*v))
-                    .ok_or_else(|| ResolveError::UnknownEvidence(r.id().to_owned()))
+                claim_versions
+                    .get(&(r.id(), r.version()))
+                    .cloned()
+                    .ok_or_else(|| ResolveError::UnknownEvidence(r.id().to_owned()))?
             };
             match pin::build(
                 &resolver,
@@ -856,12 +957,12 @@ fn stage(
                 problems.join("; ")
             ));
         }
-        claims = Some(returned);
     }
     Ok(Staged {
         run: run.to_owned(),
         tmp: tmp.to_path_buf(),
         output: new_subject,
+        pinned_editable,
         inputs: used.clone(),
         claims,
         pins,
@@ -988,12 +1089,19 @@ fn adopt(
         report.message = Some("the evidence disappeared during the run".into());
         return report;
     };
+    let mut versions: Vec<_> = match &result {
+        Ok(staged) => &staged.inputs,
+        Err(failure) => &failure.inputs,
+    }
+    .values()
+    .map(|i| (i.snapshot.to_string(), i.storage))
+    .collect();
     let finished = match result {
         Ok(staged) => {
             report.run = Some(staged.run.clone());
             report.inputs = inputs_used(&staged.inputs);
             let tmp = staged.tmp.clone();
-            let adopted = adopt_staged(layout, ws.store(), pair, node, &staged, now, &mut report);
+            let adopted = adopt_staged(layout, ws, pair, node, &staged, now, &mut report);
             let _ = std::fs::remove_dir_all(&tmp);
             adopted
         }
@@ -1036,6 +1144,21 @@ fn adopt(
             .ok()
             .and_then(|t| crate::protection::state_in(layout, &t).ok())
     {
+        if report.content.is_some() {
+            versions.extend(
+                pair.file
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.content.as_ref())
+                    .map(|c| (c.snapshot.to_string(), c.storage)),
+            );
+            versions.extend(
+                state
+                    .content
+                    .as_ref()
+                    .map(|c| (c.snapshot.to_string(), c.storage)),
+            );
+        }
         event.locator = state
             .runs
             .get(&node.production)
@@ -1046,7 +1169,15 @@ fn adopt(
             .iter()
             .filter_map(|c| state.pins.get(c).map(|p| PinEvent::of(c, p)))
             .collect();
+        versions.extend(
+            report
+                .pinned
+                .iter()
+                .filter_map(|id| state.pins.get(id))
+                .flat_map(pin::recorded_versions),
+        );
     }
+    event.versions = Some(versions);
     let _ = history::append(layout, &pair.id, &event);
     report
 }
@@ -1066,7 +1197,7 @@ fn inputs_used(inputs: &BTreeMap<String, InputVersion>) -> Vec<InputUsed> {
 
 fn adopt_staged(
     layout: &Layout,
-    store: &cas_fs::Store,
+    ws: &Workspace,
     pair: &Pair,
     node: &Node,
     staged: &Staged,
@@ -1088,18 +1219,33 @@ fn adopt_staged(
     let mut state = crate::protection::writable_state(layout, &text)
         .map_err(|e| format!("{}: {e}", pair.evid_rel))?;
     let mut changed = false;
+    let resolver = Resolver::new(ws);
 
     let mut tx = Transaction::begin(layout, "run").map_err(|e| e.to_string())?;
-    if let Some((output, snapshot)) = &staged.output {
+    if let Some(
+        version @ Version::Captured {
+            path: output,
+            snapshot,
+            storage,
+            ..
+        },
+    ) = &staged.output
+    {
+        let stored = resolver.keep(version).map_err(|e| e.to_string())?;
+        if stored.snapshot() != *snapshot {
+            return Err("the staged output changed during the run".into());
+        }
         let previous = state.content.as_ref().map(|c| c.snapshot);
         let content_changed = previous != Some(*snapshot);
-        changed |= content_changed;
+        changed |=
+            content_changed || state.content.as_ref().and_then(|c| c.storage) != Some(*storage);
         if disk_snapshot(&pair.subject_path) != Some(*snapshot) {
             tx.stage_path(&pair.subject_path, output)
                 .map_err(|e| e.to_string())?;
         }
         state.content = Some(ContentRecord {
             snapshot: *snapshot,
+            storage: Some(*storage),
             updated_at: if content_changed {
                 now
             } else {
@@ -1113,6 +1259,9 @@ fn adopt_staged(
             snapshot: snapshot.to_string(),
             previous: previous.map(|p| p.to_string()),
         });
+    }
+    if let Some(version) = &staged.pinned_editable {
+        resolver.keep(version).map_err(|e| e.to_string())?;
     }
     if let Some(claims) = &staged.claims {
         let old = state.generated.remove(&production.name).unwrap_or_default();
@@ -1156,7 +1305,8 @@ fn adopt_staged(
                 production,
             )),
             fingerprint_version: Some(FINGERPRINT_VERSION),
-            subject: staged.output.as_ref().map(|(_, s)| *s),
+            subject: staged.output.as_ref().map(Version::snapshot),
+            subject_storage: staged.output.as_ref().and_then(Version::storage),
             inputs: staged.inputs.clone(),
             claims: staged
                 .claims
@@ -1171,13 +1321,18 @@ fn adopt_staged(
     if let Some(current) = pair.membership.as_ref().and_then(|m| m.current.clone()) {
         state.member = Some(current);
     }
-    let snapshot = state
+    let version = state
         .content
         .as_ref()
-        .map(|c| c.snapshot)
-        .or_else(|| disk_snapshot(&pair.subject_path));
-    let replay =
-        crate::replay::publish(layout, store, pair, &state, snapshot).map_err(|e| e.to_string())?;
+        .map(|c| (c.snapshot, c.storage))
+        .or_else(|| {
+            staged
+                .pinned_editable
+                .as_ref()
+                .map(|v| (v.snapshot(), v.storage()))
+        });
+    let replay = crate::replay::publish(layout, &resolver, pair, &state, version)
+        .map_err(|e| e.to_string())?;
     let new_text = crate::protection::replace_state(layout, &text, &state, replay)
         .map_err(|e| format!("{}: {e}", pair.evid_rel))?;
     tx.stage_bytes(&pair.evid_path, new_text.as_bytes())

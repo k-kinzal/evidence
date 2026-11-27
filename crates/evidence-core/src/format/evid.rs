@@ -53,6 +53,9 @@ pub struct EvidenceFile {
     /// Subject format. Inferred from the subject's extension when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<Format>,
+    /// Storage policy for new snapshots of this subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StoragePolicy>,
 
     /// Commands that produce the subject and/or claims. Without a production that writes
     /// the subject, the subject is edited directly (editable).
@@ -93,6 +96,15 @@ pub struct EvidenceFile {
     /// Tool-managed state. Never edit by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<State>,
+}
+
+/// Per-evidence snapshot encryption policy. An omitted setting inherits from dependencies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StoragePolicy {
+    /// `true` encrypts the subject. `false` permits plaintext with plaintext dependencies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<bool>,
 }
 
 /// Whether a subject is edited directly or written by a production.
@@ -291,6 +303,23 @@ impl Production {
     /// The program (first element of `run`).
     pub fn program(&self) -> &str {
         self.run.first().map_or("", String::as_str)
+    }
+
+    pub(crate) fn uses_previous_subject(&self) -> bool {
+        self.run
+            .iter()
+            .chain(self.env.values())
+            .chain(&self.stdin)
+            .chain(&self.cwd)
+            .chain(self.locator.values().flat_map(|locator| match locator {
+                LocatorValue::Text(value) => std::slice::from_ref(value),
+                LocatorValue::Command(args) => args.as_slice(),
+            }))
+            .any(|value| {
+                super::template::placeholders(value).is_ok_and(|items| {
+                    items.contains(&super::template::Placeholder::Simple("subject"))
+                })
+            })
     }
 
     /// The command part, as an [`Action`].
@@ -541,7 +570,7 @@ pub struct ReferenceDetail {
 }
 
 /// The version a reference resolves to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case", tag = "version", content = "revision")]
 pub enum RefVersion {
     /// The current version of the target.

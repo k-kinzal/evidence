@@ -102,6 +102,10 @@
           "$ref": "#/$defs/SnapshotIdSchema",
           "description": "Snapshot of the adopted content."
         },
+        "storage": {
+          "$ref": "#/$defs/SnapshotStorage",
+          "description": "The storage class of this snapshot, when recorded."
+        },
         "updated_at": {
           "$ref": "#/$defs/TimestampSchema",
           "description": "When the adopted content last changed."
@@ -179,6 +183,10 @@
         "state": {
           "$ref": "#/$defs/State",
           "description": "Tool-managed state. Never edit by hand."
+        },
+        "storage": {
+          "$ref": "#/$defs/StoragePolicy",
+          "description": "Storage policy for new snapshots of this subject."
         },
         "subject": {
           "description": "Where the subject lives: a path relative to this evidence file's directory, or\nabsolute. Defaults to this file's own path without `.evid` (the sidecar layout). A\nsubject outside the project works, but draws a `subject-outside-project` warning.",
@@ -299,6 +307,10 @@
         "snapshot": {
           "$ref": "#/$defs/SnapshotIdSchema",
           "description": "Snapshot used."
+        },
+        "storage": {
+          "$ref": "#/$defs/SnapshotStorage",
+          "description": "The storage class of this input snapshot, when recorded."
         }
       },
       "required": [
@@ -544,6 +556,10 @@
         "snapshot": {
           "$ref": "#/$defs/SnapshotIdSchema",
           "description": "Snapshot of the subject (absent for some migrated pins)."
+        },
+        "storage": {
+          "$ref": "#/$defs/SnapshotStorage",
+          "description": "The storage class of the subject snapshot, when recorded."
         }
       },
       "required": [
@@ -566,6 +582,10 @@
         "snapshot": {
           "$ref": "#/$defs/SnapshotIdSchema",
           "description": "Snapshot of the referenced subject."
+        },
+        "storage": {
+          "$ref": "#/$defs/SnapshotStorage",
+          "description": "The storage class of this referenced snapshot, when recorded."
         }
       },
       "required": [
@@ -849,6 +869,10 @@
         "subject": {
           "$ref": "#/$defs/SnapshotIdSchema",
           "description": "The subject version the run wrote, or read (claims-only runs)."
+        },
+        "subject_storage": {
+          "$ref": "#/$defs/SnapshotStorage",
+          "description": "Storage class of the subject version written by the run, when recorded."
         }
       },
       "required": [
@@ -969,6 +993,21 @@
       "pattern": "^sha256:[0-9a-f]{64}$",
       "type": "string"
     },
+    "SnapshotStorage": {
+      "description": "The storage class of a recorded version.",
+      "oneOf": [
+        {
+          "const": "plain",
+          "description": "A plaintext snapshot.",
+          "type": "string"
+        },
+        {
+          "const": "encrypted",
+          "description": "A snapshot encrypted by the local store.",
+          "type": "string"
+        }
+      ]
+    },
     "State": {
       "additionalProperties": false,
       "description": "State written by the tool after runs and pins. Humans must not edit it.",
@@ -1015,6 +1054,17 @@
           },
           "description": "The last successful run of each production, by production name.",
           "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "StoragePolicy": {
+      "additionalProperties": false,
+      "description": "Per-evidence snapshot encryption policy. An omitted setting inherits from dependencies.",
+      "properties": {
+        "encryption": {
+          "description": "`true` encrypts the subject. `false` permits plaintext with plaintext dependencies.",
+          "type": "boolean"
         }
       },
       "type": "object"

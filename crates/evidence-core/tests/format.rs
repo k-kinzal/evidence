@@ -149,6 +149,7 @@ fn state_write_preserves_definition() {
     let mut state = State {
         content: Some(ContentRecord {
             snapshot: ObjectId::of(b"data"),
+            storage: None,
             updated_at: "2026-01-01T00:00:00Z".parse().unwrap(),
             production: Some("fetch".into()),
             run: None,

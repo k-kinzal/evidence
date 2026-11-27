@@ -77,27 +77,48 @@ command could not run (including usage errors such as `update --pin --force`).
 
 ## Snapshot encryption
 
-`evidence update` and `evidence update --pin` automatically encrypt newly stored snapshots,
-tool-managed `.evid` state, and new history records. Ordinary commands read them through the
-same project interface. The random project key and plaintext-digest index live in the
-Git-ignored `.evidence/private/` directory. Keep that directory with the worktree to read
-its local history and snapshots. Older plaintext snapshots and state are readable.
+`evidence update` and `evidence update --pin` choose how to store each new snapshot. External
+acquisitions and hand-edited subjects without dependencies default to encryption. A subject
+that uses only known plaintext versions inherits plaintext storage. Encryption applies when
+any production input, claim reference, or parent list entry is encrypted or its storage is
+unknown. Declare everything a command reads in `inputs`; Evidence can follow declared
+dependencies and references, and commands may also access data outside those declarations.
+Set `encryption = true` if a command with public inputs also reads private external data.
 
-To turn encryption off for new writes, set this in `.evidence/config.toml` or your local
-configuration layer.
+For approved public content, set this in its `.evid` definition. If any dependency is
+encrypted or unknown, the update or pin fails. Use `true` to encrypt the snapshot regardless
+of its dependencies.
+
+```toml
+[storage]
+encryption = false
+```
+
+With the default project configuration, `.evidence/objects/blob/` and `tree/` hold local
+plaintext objects and `.evidence/objects/sealed/` holds local ciphertext. These directories
+are Git-ignored. Tool-managed `.evid` state and new history records remain encrypted for
+plaintext snapshots as well. The random key and plaintext-digest index live in the
+Git-ignored `.evidence/private/` directory. Keep it with the worktree to read local history
+and encrypted snapshots. Older snapshots and state remain readable, and policy changes
+apply to newly stored versions. Review Git history separately if plaintext was committed.
+
+To opt the project out of encryption for new writes, including state and history, set this
+in `.evidence/config.toml` or your local configuration layer. This overrides per-file policy.
 
 ```toml
 [store]
 encryption = false
 ```
 
-For an accepted file with recorded input file versions, an update also stores a replay object
-under `.evidence/objects/replay/`. Its name is the digest of the ciphertext. The corresponding
-`.evid` state identifies the required inputs. In another checkout, the usual `evidence update`
-can reacquire those inputs with its configured productions and recover the accepted file from
-the exact input bytes. For a time-series query, keep the source version or as-of time, range,
-and output settings in the ordinary acquisition definition. With an incorrect input version,
-the accepted artifact stays locked and the update reports which artifact needs its inputs.
+For an encrypted accepted file with reproducible dependencies, an update can also store a
+replay object under `.evidence/objects/replay/`. To create one, Evidence requires at least one
+recorded encrypted input or reference whose bytes have no local plaintext copy. Its name is
+the digest of the ciphertext. The `.evid` state identifies the required inputs. In another
+checkout, the usual `evidence update` can reacquire those inputs via their configured
+productions and recover the accepted file from the exact input bytes. For a time-series
+query, keep the source version or as-of time, range, and output settings in the acquisition
+definition. With an incorrect input version, the accepted artifact stays locked and the
+update reports which artifact needs its inputs.
 
 Replay objects use salted Argon2id key derivation and authenticated encryption. Use them with
 inputs that are difficult to guess. A reader who retains the exact inputs can reopen the

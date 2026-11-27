@@ -9,11 +9,11 @@ use argon2::{Algorithm, Argon2, Block, Params, Version};
 use cas_fs::{EncryptionKey, Hasher, ObjectId, ObjectKind, Store};
 use zeroize::Zeroizing;
 
-use crate::format::{ProtectedState, ReplayState, State};
+use crate::format::{Production, ProtectedState, ReplayState, SnapshotStorage, State};
 use crate::journal::Transaction;
 use crate::layout::Layout;
 use crate::protection;
-use crate::snapshot::disk_snapshot;
+use crate::snapshot::{Resolver, Version as SnapshotVersion, disk_snapshot};
 use crate::workspace::{Pair, Workspace};
 use crate::{Error, Result};
 
@@ -23,35 +23,74 @@ const STATE_LIMIT: u64 = 4 * 1024 * 1024;
 
 pub(crate) fn publish(
     layout: &Layout,
-    store: &Store,
+    resolver: &Resolver<'_>,
     pair: &Pair,
     state: &State,
-    snapshot: Option<ObjectId>,
+    subject: Option<(ObjectId, Option<SnapshotStorage>)>,
 ) -> Result<Option<ReplayState>> {
     if !layout.config().config.store.encryption_enabled()
         || pair.outside_project
         || pair.membership.is_some()
         || pair.file.members.is_some()
+        || pair
+            .file
+            .subject_writer()
+            .is_some_and(Production::uses_previous_subject)
     {
         return Ok(None);
     }
-    let Some(snapshot) = snapshot.filter(|id| store.kind(id) == Some(ObjectKind::Blob)) else {
+    let Some((snapshot, Some(SnapshotStorage::Encrypted))) = subject else {
         return Ok(None);
     };
-    let Some(dependencies) = dependencies(&pair.id, state).filter(|d| !d.is_empty()) else {
+    let store = resolver.store;
+    let Some(dependencies) = dependencies(&pair.id, state) else {
         return Ok(None);
     };
+    if pair
+        .file
+        .claims
+        .iter()
+        .chain(state.generated.values().flatten())
+        .flat_map(|c| &c.evidence)
+        .any(|r| r.id() == pair.id && r.is_fixed())
+    {
+        return Ok(None);
+    }
+    let plain = store.scoped(cas_fs::Storage::Plain);
+    if !dependencies
+        .values()
+        .any(|(id, class)| *class == Some(SnapshotStorage::Encrypted) && !plain.contains(id))
+    {
+        return Ok(None);
+    }
+    for reference in pair.file.claims.iter().flat_map(|claim| &claim.evidence) {
+        if reference.id() == pair.id && !reference.is_fixed() {
+            continue;
+        }
+        let Some(version) = resolver.version_of(reference).ok() else {
+            return Ok(None);
+        };
+        if dependencies.get(reference.id()) != Some(&(version.snapshot(), version.storage())) {
+            return Ok(None);
+        }
+    }
+    let encrypted = store.scoped(cas_fs::Storage::Encrypted);
+    if encrypted.kind(&snapshot) != Some(ObjectKind::Blob) {
+        return Ok(None);
+    }
     let mut budget = LIMIT;
-    let Some(body) = read_blob(store, snapshot, &mut budget)? else {
+    let Some(body) = read_blob(&encrypted, snapshot, &mut budget)? else {
         return Ok(None);
     };
     let mut inputs = Vec::new();
     let mut bytes = Vec::new();
-    for (id, version) in dependencies {
-        if store.kind(&version) != Some(ObjectKind::Blob) {
+    for (id, (snapshot, class)) in dependencies {
+        let version = SnapshotVersion::Stored(snapshot, class);
+        let source = version.store(store);
+        if source.kind(&snapshot) != Some(ObjectKind::Blob) {
             return Ok(None);
         }
-        let Some(input) = read_blob(store, version, &mut budget)? else {
+        let Some(input) = read_blob(&source, snapshot, &mut budget)? else {
             return Ok(None);
         };
         inputs.push(id);
@@ -81,7 +120,9 @@ pub(crate) fn publish(
     Ok(Some(ReplayState { object: id, inputs }))
 }
 
-fn dependencies(id: &str, state: &State) -> Option<BTreeMap<String, ObjectId>> {
+type Dependencies = BTreeMap<String, (ObjectId, Option<SnapshotStorage>)>;
+
+fn dependencies(id: &str, state: &State) -> Option<Dependencies> {
     let mut result = BTreeMap::new();
     let mut add = |name: &str, snapshot| match result.entry(name.to_owned()) {
         std::collections::btree_map::Entry::Vacant(entry) => {
@@ -91,13 +132,13 @@ fn dependencies(id: &str, state: &State) -> Option<BTreeMap<String, ObjectId>> {
         std::collections::btree_map::Entry::Occupied(entry) => *entry.get() == snapshot,
     };
     for input in state.runs.values().flat_map(|run| run.inputs.values()) {
-        if input.id == id || !add(&input.id, input.snapshot) {
+        if input.id == id || !add(&input.id, (input.snapshot, input.storage)) {
             return None;
         }
     }
     for reference in state.pins.values().flat_map(|pin| &pin.evidence) {
         let name = reference.key.split([':', '#', '@']).next()?;
-        if name != id && !add(name, reference.snapshot) {
+        if name != id && !add(name, (reference.snapshot, reference.storage)) {
             return None;
         }
     }
@@ -372,8 +413,21 @@ fn restore_one(
     let state: State = serde_json::from_slice(metadata)
         .map_err(|_| Error::Invalid("invalid restored state".into()))?;
     let actual = ObjectId::of(body);
-    if state.protected.is_some() || state.content.as_ref().is_some_and(|s| s.snapshot != actual) {
+    if state.protected.is_some()
+        || state
+            .content
+            .as_ref()
+            .is_some_and(|s| s.snapshot != actual || s.storage == Some(SnapshotStorage::Plain))
+    {
         return Err(Error::Invalid("invalid restored snapshot".into()));
+    }
+    let dependencies = dependencies(&pair.id, &state)
+        .filter(|deps| deps.keys().eq(replay.inputs.iter()))
+        .ok_or_else(|| Error::Invalid("invalid restored inputs".into()))?;
+    for ((snapshot, _), input) in dependencies.values().zip(inputs) {
+        if ObjectId::of(input) != *snapshot {
+            return Err(Error::Invalid("invalid restored input version".into()));
+        }
     }
     if fs::symlink_metadata(&pair.subject_path).is_ok_and(|m| !m.is_file())
         || disk_snapshot(&pair.subject_path).is_some_and(|hash| hash != actual)
@@ -398,10 +452,11 @@ fn restore_one(
     let state_context = protection::state_context(&text).map_err(Error::Invalid)?;
     let (cache_path, auth) = cache(layout, &state_context, protected)?;
     create_parent(&cache_path)?;
-    for input in inputs {
-        store.put_bytes(input)?;
+    for ((_, storage), input) in dependencies.values().zip(inputs) {
+        let storage = storage.unwrap_or(SnapshotStorage::Encrypted);
+        store.scoped(storage.into()).put_bytes(input)?;
     }
-    store.put_bytes(body)?;
+    store.scoped(cas_fs::Storage::Encrypted).put_bytes(body)?;
     let mut transaction = Transaction::begin(layout, "replay")?;
     let result = (|| {
         if !pair.subject_path.is_file() {

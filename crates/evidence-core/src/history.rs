@@ -10,6 +10,7 @@ use std::io::Write;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::format::SnapshotStorage;
 use crate::layout::Layout;
 
 /// One history record.
@@ -56,6 +57,9 @@ pub struct Event {
     /// Duration in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// Snapshot versions mentioned by this event, with their physical storage classes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub versions: Option<Vec<(String, Option<SnapshotStorage>)>>,
 }
 
 /// A pin recorded by an event.
@@ -110,6 +114,7 @@ impl Event {
             by: None,
             message: None,
             duration_ms: None,
+            versions: None,
         }
     }
 }
@@ -182,7 +187,9 @@ pub(crate) fn read(layout: &Layout, id: &str) -> Result<Vec<Event>> {
 }
 
 /// Every snapshot id mentioned in any history file.
-pub(crate) fn referenced_snapshots(layout: &Layout) -> Result<Vec<String>> {
+pub(crate) fn referenced_snapshots(
+    layout: &Layout,
+) -> Result<Vec<(String, Option<SnapshotStorage>)>> {
     let dir = layout.history_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Ok(Vec::new());
@@ -198,12 +205,19 @@ pub(crate) fn referenced_snapshots(layout: &Layout) -> Result<Vec<String>> {
             continue;
         };
         for event in read(layout, &id)? {
-            out.extend(event.snapshot);
-            out.extend(event.previous);
-            out.extend(event.inputs.into_values());
-            for pin in event.pins {
-                out.extend(pin.subject);
-                out.extend(pin.evidence.into_values());
+            if let Some(versions) = event.versions {
+                out.extend(versions);
+            } else {
+                let ids =
+                    event
+                        .snapshot
+                        .into_iter()
+                        .chain(event.previous)
+                        .chain(event.inputs.into_values())
+                        .chain(event.pins.into_iter().flat_map(|pin| {
+                            pin.subject.into_iter().chain(pin.evidence.into_values())
+                        }));
+                out.extend(ids.map(|id| (id, None)));
             }
         }
     }

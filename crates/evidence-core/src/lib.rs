@@ -53,6 +53,7 @@ mod replay;
 mod search;
 mod snapshot;
 mod status;
+mod storage_policy;
 mod store;
 mod subject_schema;
 mod update;

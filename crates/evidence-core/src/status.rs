@@ -15,8 +15,10 @@ use span_select::Span;
 use crate::fingerprint;
 use crate::format::{
     Claim, ClaimSource, ContentMode, Output, Production, RefVersion, Reference, RunRecord,
+    SnapshotStorage,
 };
 use crate::snapshot::{ResolveError, Resolver, Version, disk_snapshot, selected_hash};
+use crate::storage_policy;
 use crate::workspace::{Pair, Workspace};
 
 /// Overall health of a pair, ordered from best to worst.
@@ -474,6 +476,26 @@ pub(crate) fn production_reasons(
     }
     out.extend(input_reasons(&resolver, pair, production, record));
     if production.writes_subject() {
+        if ws.encryption_enabled()
+            && state
+                .content
+                .as_ref()
+                .is_some_and(|c| c.storage == Some(SnapshotStorage::Plain))
+        {
+            let mut deps = storage_policy::subject_dependencies(pair, None, &mut |r| {
+                storage_policy::reference_storage(&resolver, r)
+            });
+            for input in record.inputs.values() {
+                deps.add(&input.id, input.storage);
+            }
+            if deps.decide(&resolver, pair) != Ok(SnapshotStorage::Plain) {
+                out.push(Reason::new(
+                    Health::Stale,
+                    "storage-changed",
+                    "the subject's storage policy or evidence dependencies changed",
+                ));
+            }
+        }
         let adopted = state.content.as_ref().map(|c| c.snapshot);
         if !pair.subject_path.exists() {
             out.push(Reason::new(
@@ -524,12 +546,18 @@ fn input_reasons(
             continue;
         };
         // Not produced yet: the upstream production is pending, not this one.
-        let Ok(now) = resolver.version_of(input) else {
-            continue;
+        let now = match resolver.version_of(input) {
+            Ok(version) => version,
+            Err(e @ ResolveError::StorageConflict(_)) => {
+                out.push(Reason::new(Health::Stale, "storage-changed", e.to_string()));
+                continue;
+            }
+            Err(_) => continue,
         };
         let changed = match used {
             None => true,
             Some(used) if used.id != target.id => true,
+            Some(used) if used.storage.is_some() && used.storage != now.storage() => true,
             Some(used) => {
                 if input.selector().is_some() || input.path().is_some() {
                     match resolver.fragment(&now, input.path(), input.selector()) {
@@ -889,6 +917,7 @@ fn pending_reference(resolver: &Resolver<'_>, reference: &Reference) -> Option<N
             matches!(
                 r.code,
                 "input-changed"
+                    | "storage-changed"
                     | "due"
                     | "run-failed"
                     | "production-changed"

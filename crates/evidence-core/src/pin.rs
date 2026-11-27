@@ -15,12 +15,14 @@ use crate::error::{Error, Result};
 use crate::fingerprint;
 use crate::format::{
     Claim, ContentMode, FINGERPRINT_VERSION, PinRecord, PinnedContent, PinnedReference, Reference,
+    SnapshotStorage,
 };
 use crate::history::{self, Event, PinEvent};
 use crate::journal::{self, Transaction};
 use crate::layout::Layout;
-use crate::snapshot::{ResolveError, Resolver, Version, disk_snapshot, selected_hash};
+use crate::snapshot::{ResolveError, Resolver, Version, capture, disk_snapshot, selected_hash};
 use crate::status::ANCHOR_LIMIT;
+use crate::storage_policy;
 use crate::workspace::{Pair, Workspace};
 
 /// Who and what recorded a pin.
@@ -58,6 +60,7 @@ pub(crate) fn build(
             Ok((version, fragment)) => evidence.push(PinnedReference {
                 key: reference.key(),
                 snapshot: version.snapshot(),
+                storage: version.storage(),
                 fragment,
             }),
             Err(e) => problems.push(format!("`{}`: {e}", reference.key())),
@@ -79,12 +82,27 @@ pub(crate) fn build(
         fingerprint_version: Some(FINGERPRINT_VERSION),
         content: PinnedContent {
             snapshot: Some(subject.snapshot()),
+            storage: subject.storage(),
             fragment,
         },
         anchor: (claimed.len() <= ANCHOR_LIMIT).then(|| claimed.to_owned()),
         evidence,
         legacy: false,
     })
+}
+
+pub(crate) fn recorded_versions(
+    pin: &PinRecord,
+) -> impl Iterator<Item = (String, Option<crate::format::SnapshotStorage>)> + '_ {
+    pin.content
+        .snapshot
+        .into_iter()
+        .map(|id| (id.to_string(), pin.content.storage))
+        .chain(
+            pin.evidence
+                .iter()
+                .map(|r| (r.snapshot.to_string(), r.storage)),
+        )
 }
 
 /// Options of [`pin`] (`evidence update --pin`).
@@ -184,6 +202,7 @@ struct Planned<'a> {
     text: String,
     /// The captured subject of an editable pair.
     captured: Option<cas_fs::ObjectId>,
+    subject: Version,
     pins: BTreeMap<String, PinRecord>,
 }
 
@@ -266,15 +285,49 @@ pub(crate) fn pin(
                 continue;
             }
         };
-        let (version, body) = subject;
+        let (mut version, body) = subject;
+        let claims: Vec<_> = pair
+            .file
+            .all_claims()
+            .into_iter()
+            .map(|(claim, _)| claim)
+            .filter(|claim| only.as_ref().is_none_or(|ids| ids.contains(&claim.id)))
+            .collect();
+        let mut references = BTreeMap::new();
+        for reference in claims.iter().flat_map(|claim| &claim.evidence) {
+            if reference.id() != pair.id || reference.is_fixed() {
+                references
+                    .entry((reference.id(), reference.version()))
+                    .or_insert_with(|| resolver.version_of(reference));
+            }
+        }
+        let mut deps = storage_policy::subject_dependencies(pair, None, &mut |r| match references
+            .get(&(r.id(), r.version()))
+        {
+            Some(version) => version.as_ref().ok().and_then(Version::storage),
+            None => storage_policy::reference_storage(&resolver, r),
+        });
+        for ((id, _), version) in &references {
+            deps.add(id, version.as_ref().ok().and_then(Version::storage));
+        }
+        match deps.decide(&resolver, pair) {
+            Ok(class) => {
+                if let Version::Captured { storage, .. } = &mut version {
+                    *storage = class;
+                }
+            }
+            Err(e) => {
+                out.failed.push(PinFailure {
+                    claim: None,
+                    reasons: vec![e.to_string()],
+                });
+                report.pairs.push(out);
+                continue;
+            }
+        }
         let captured = match &version {
             Version::Captured { snapshot, .. } => Some(*snapshot),
-            Version::Stored(_) => None,
-        };
-        let stored_subject = if opts.dry_run {
-            version.clone()
-        } else {
-            Version::Stored(resolver.keep(&version)?)
+            Version::Stored(..) => None,
         };
         let keep = |v: Version| -> std::result::Result<Version, ResolveError> {
             if opts.dry_run {
@@ -282,14 +335,17 @@ pub(crate) fn pin(
             }
             resolver
                 .keep(&v)
-                .map(Version::Stored)
                 .map_err(|e| ResolveError::Unreadable(e.to_string()))
         };
         let version_of = |r: &Reference| -> std::result::Result<Version, ResolveError> {
             if r.id() == pair.id && !r.is_fixed() {
-                return Ok(stored_subject.clone());
+                return Ok(version.clone());
             }
-            keep(resolver.version_of(r)?)
+            references
+                .get(&(r.id(), r.version()))
+                .cloned()
+                .ok_or_else(|| ResolveError::UnknownEvidence(r.id().to_owned()))?
+                .and_then(keep)
         };
         let source = PinSource {
             at: now,
@@ -297,18 +353,8 @@ pub(crate) fn pin(
             run: None,
         };
         let mut pins = BTreeMap::new();
-        for (claim, _) in pair.file.all_claims() {
-            if only.as_ref().is_some_and(|o| !o.contains(&claim.id)) {
-                continue;
-            }
-            match build(
-                &resolver,
-                claim,
-                &stored_subject,
-                &body,
-                &version_of,
-                &source,
-            ) {
+        for claim in claims {
+            match build(&resolver, claim, &version, &body, &version_of, &source) {
                 Ok(record) => {
                     out.pinned.push(PinnedClaim {
                         claim: claim.id.clone(),
@@ -341,13 +387,14 @@ pub(crate) fn pin(
             pair,
             text,
             captured,
+            subject: version,
             pins,
         });
     }
     if opts.dry_run || report.has_failures() {
         return Ok(report);
     }
-    commit(layout, &planned, by.as_deref(), now)?;
+    commit(layout, &resolver, &planned, by.as_deref(), now)?;
     report.recorded = true;
     Ok(report)
 }
@@ -385,7 +432,15 @@ fn subject_for_pin(
             Some(_) => {}
         }
     }
-    let version = resolver.current(pair).map_err(|e| e.to_string())?;
+    let version = match pair.file.content_mode() {
+        ContentMode::Produced => resolver.current(pair),
+        ContentMode::Editable => capture(
+            &pair.subject_path,
+            &pair.subject_rel,
+            SnapshotStorage::Encrypted,
+        ),
+    }
+    .map_err(|e| e.to_string())?;
     let text = resolver.text(&version, None).map_err(|e| e.to_string())?;
     Ok((version, text))
 }
@@ -393,6 +448,7 @@ fn subject_for_pin(
 /// Records the planned pins of every pair together, refusing on any conflict.
 fn commit(
     layout: &Layout,
+    resolver: &Resolver<'_>,
     planned: &[Planned<'_>],
     by: Option<&str>,
     now: Timestamp,
@@ -400,9 +456,6 @@ fn commit(
     let mut tx = Transaction::begin(layout, "pin")?;
     let mut events = Vec::new();
     for p in planned {
-        if p.pins.is_empty() {
-            continue;
-        }
         let current = std::fs::read_to_string(&p.pair.evid_path)
             .map_err(|e| Error::io(&p.pair.evid_path, e))?;
         let subject_moved = p
@@ -419,15 +472,17 @@ fn commit(
                 }
             )));
         }
+        resolver.keep(&p.subject)?;
+        if p.pins.is_empty() {
+            continue;
+        }
         let mut state = crate::protection::writable_state(layout, &p.text)
             .map_err(|e| Error::Invalid(format!("{}: {e}", p.pair.evid_rel)))?;
         for (id, record) in &p.pins {
             state.pins.insert(id.clone(), record.clone());
         }
-        let snapshot = p
-            .captured
-            .or_else(|| state.content.as_ref().map(|c| c.snapshot));
-        let replay = crate::replay::publish(layout, &layout.store()?, p.pair, &state, snapshot)?;
+        let version = Some((p.subject.snapshot(), p.subject.storage()));
+        let replay = crate::replay::publish(layout, resolver, p.pair, &state, version)?;
         let text = crate::protection::replace_state(layout, &p.text, &state, replay)
             .map_err(|e| Error::Invalid(format!("{}: {e}", p.pair.evid_rel)))?;
         tx.stage_bytes(&p.pair.evid_path, text.as_bytes())?;
@@ -435,6 +490,7 @@ fn commit(
         event.by = by.map(str::to_owned);
         event.claims = p.pins.keys().cloned().collect();
         event.pins = p.pins.iter().map(|(id, r)| PinEvent::of(id, r)).collect();
+        event.versions = Some(p.pins.values().flat_map(recorded_versions).collect());
         events.push((p.pair.id.clone(), event));
     }
     tx.commit()?;
@@ -457,9 +513,9 @@ pub(crate) fn plan_then<F: FnOnce()>(layout: &Layout, target: &str, between: F) 
     let (version, body) = subject_for_pin(&resolver, pair).map_err(Error::Invalid)?;
     let captured = match &version {
         Version::Captured { snapshot, .. } => Some(*snapshot),
-        Version::Stored(_) => None,
+        Version::Stored(..) => None,
     };
-    let stored = Version::Stored(resolver.keep(&version)?);
+    let stored = resolver.keep(&version)?;
     let source = PinSource {
         at: Timestamp::now(),
         by: None,
@@ -469,7 +525,6 @@ pub(crate) fn plan_then<F: FnOnce()>(layout: &Layout, target: &str, between: F) 
         resolver.version_of(r).and_then(|v| {
             resolver
                 .keep(&v)
-                .map(Version::Stored)
                 .map_err(|e| ResolveError::Unreadable(e.to_string()))
         })
     };
@@ -482,10 +537,12 @@ pub(crate) fn plan_then<F: FnOnce()>(layout: &Layout, target: &str, between: F) 
     between();
     commit(
         layout,
+        &resolver,
         &[Planned {
             pair,
             text,
             captured,
+            subject: stored,
             pins,
         }],
         None,

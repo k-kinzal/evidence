@@ -55,6 +55,11 @@ pub(crate) fn production(file: &EvidenceFile, evid_dir: &Path, p: &Production) -
         "inputs": p.inputs.iter().map(reference).collect::<Vec<_>>(),
         "locator": serde_json::to_value(&p.locator).unwrap_or(Value::Null),
     });
+    if let Some(encryption) = file.storage.as_ref().and_then(|s| s.encryption)
+        && let Value::Object(map) = &mut value
+    {
+        map.insert("storage_encryption".into(), Value::Bool(encryption));
+    }
     if p.writes_subject()
         && let Value::Object(map) = &mut value
     {

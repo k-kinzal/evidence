@@ -410,7 +410,7 @@ pub(crate) fn requirements(
     let resolver = Resolver::new(ws);
     let version = match revision {
         Some(r) => resolver
-            .stored(r)
+            .fixed(Some(pair), r)
             .map_err(|e| Error::Invalid(e.to_string()))?,
         None => resolver
             .current(pair)
@@ -792,11 +792,12 @@ fn files_of(resolver: &Resolver<'_>, version: &Version) -> Result<Vec<Option<Str
     }
     let mut out = Vec::new();
     match version {
-        Version::Stored(id) => {
-            if resolver.store.kind(id) != Some(cas_fs::ObjectKind::Tree) {
+        Version::Stored(id, _) => {
+            let store = version.store(resolver.store);
+            if store.kind(id) != Some(cas_fs::ObjectKind::Tree) {
                 return Ok(vec![None]);
             }
-            walk_store(resolver.store, id, "", &mut out)?;
+            walk_store(&store, id, "", &mut out)?;
         }
         Version::Captured { path, bytes, .. } => {
             if bytes.is_some() || path.is_file() {

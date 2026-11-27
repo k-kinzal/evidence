@@ -35,7 +35,7 @@ backup/
 objects/tmp/
 lock
 config.local.toml
-# Uncomment to keep snapshots out of git (share them another way):
+# Uncomment to keep the entire local store, including replay objects, out of Git:
 # objects/
 ";
 

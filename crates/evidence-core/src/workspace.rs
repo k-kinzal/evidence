@@ -180,6 +180,7 @@ impl Pair {
 #[derive(Debug, Clone)]
 pub(crate) struct Workspace {
     store: cas_fs::Store,
+    encryption: bool,
     pairs: Vec<Pair>,
     by_id: HashMap<String, usize>,
     member_files: Vec<MemberOnDisk>,
@@ -249,9 +250,14 @@ impl Workspace {
         &self.store
     }
 
+    pub(crate) fn encryption_enabled(&self) -> bool {
+        self.encryption
+    }
+
     fn from_paths(layout: &Layout, paths: &[PathBuf]) -> Result<Self> {
         let mut ws = Self {
             store: layout.store()?,
+            encryption: layout.config().config.store.encryption_enabled(),
             pairs: Vec::new(),
             by_id: HashMap::new(),
             member_files: Vec::new(),

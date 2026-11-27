@@ -66,6 +66,16 @@ pub struct PruneReport {
 pub struct Store {
     root: PathBuf,
     encrypted: Option<Encrypted>,
+    storage: Option<Storage>,
+}
+
+/// Physical storage of a snapshot and its objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Storage {
+    /// Objects stored as plaintext.
+    Plain,
+    /// Objects sealed with the local encryption key.
+    Encrypted,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +95,7 @@ impl Store {
         Ok(Self {
             root,
             encrypted: None,
+            storage: None,
         })
     }
 
@@ -111,6 +122,33 @@ impl Store {
     /// The store root directory.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Returns a view that reads and writes only in the specified storage class.
+    #[must_use]
+    pub fn scoped(&self, storage: Storage) -> Self {
+        Self {
+            storage: Some(storage),
+            ..self.clone()
+        }
+    }
+
+    fn read_encrypted(&self) -> Option<&Encrypted> {
+        self.encrypted
+            .as_ref()
+            .filter(|_| self.storage != Some(Storage::Plain))
+    }
+
+    fn write_encrypted(&self) -> Result<Option<&Encrypted>, Error> {
+        match self.storage {
+            Some(Storage::Plain) => Ok(None),
+            Some(Storage::Encrypted) => self
+                .encrypted
+                .as_ref()
+                .map(Some)
+                .ok_or(Error::EncryptionUnavailable),
+            None => Ok(self.encrypted.as_ref().filter(|e| e.write)),
+        }
     }
 
     fn object_path(&self, kind: ObjectKind, id: &ObjectId) -> PathBuf {
@@ -144,10 +182,9 @@ impl Store {
     /// Returns the kind of a stored object, or `None` if it is not in the store.
     pub fn kind(&self, id: &ObjectId) -> Option<ObjectKind> {
         [ObjectKind::Blob, ObjectKind::Tree].into_iter().find(|k| {
-            self.object_path(*k, id).is_file()
+            (self.storage != Some(Storage::Encrypted) && self.object_path(*k, id).is_file())
                 || self
-                    .encrypted
-                    .as_ref()
+                    .read_encrypted()
                     .is_some_and(|e| Self::index_path(e, *k, id).is_file())
         })
     }
@@ -164,7 +201,7 @@ impl Store {
 
     /// Streams a reader into the store as a blob.
     pub fn put_reader(&self, mut reader: impl Read) -> Result<ObjectId, Error> {
-        if let Some(encrypted) = self.encrypted.as_ref().filter(|e| e.write) {
+        if let Some(encrypted) = self.write_encrypted()? {
             return self.put_encrypted(encrypted, ObjectKind::Blob, reader);
         }
         let tmp_dir = self.root.join("tmp");
@@ -189,7 +226,7 @@ impl Store {
 
     fn put_tree(&self, tree: &Tree) -> Result<ObjectId, Error> {
         let encoded = tree.encode();
-        if let Some(encrypted) = self.encrypted.as_ref().filter(|e| e.write) {
+        if let Some(encrypted) = self.write_encrypted()? {
             return self.put_encrypted(encrypted, ObjectKind::Tree, encoded.as_slice());
         }
         let id = ObjectId::of(&encoded);
@@ -269,7 +306,7 @@ impl Store {
     }
 
     fn open_object(&self, kind: ObjectKind, id: &ObjectId) -> Result<File, Error> {
-        if let Some(encrypted) = &self.encrypted
+        if let Some(encrypted) = self.read_encrypted()
             && let Some(sealed) = Self::sealed_id(encrypted, kind, id)?
         {
             let dir = self.root.join("tmp");
@@ -277,6 +314,9 @@ impl Store {
             self.decrypt(encrypted, kind, id, &sealed, &mut file)?;
             file.rewind().map_err(|e| Error::io(&dir, e))?;
             return Ok(file);
+        }
+        if self.storage == Some(Storage::Encrypted) {
+            return Err(Error::NotFound(*id));
         }
         let path = self.object_path(kind, id);
         File::open(&path).map_err(|e| match e.kind() {
@@ -287,7 +327,7 @@ impl Store {
 
     fn read_object(&self, kind: ObjectKind, id: &ObjectId) -> Result<Vec<u8>, Error> {
         let mut bytes = Vec::new();
-        if let Some(encrypted) = &self.encrypted
+        if let Some(encrypted) = self.read_encrypted()
             && let Some(sealed) = Self::sealed_id(encrypted, kind, id)?
         {
             self.decrypt(encrypted, kind, id, &sealed, &mut bytes)?;
@@ -379,8 +419,12 @@ impl Store {
 
     /// Iterates over all object ids of the given kind.
     pub fn list(&self, kind: ObjectKind) -> Result<Vec<ObjectId>, Error> {
-        let mut out = list_at(&self.root.join(kind.dir()))?;
-        if let Some(encrypted) = &self.encrypted {
+        let mut out = if self.storage == Some(Storage::Encrypted) {
+            Vec::new()
+        } else {
+            list_at(&self.root.join(kind.dir()))?
+        };
+        if let Some(encrypted) = self.read_encrypted() {
             out.extend(list_at(&encrypted.index.join(kind.dir()))?);
         }
         out.sort();
@@ -391,12 +435,13 @@ impl Store {
     /// Re-hashes every object and reports those that do not match their id.
     pub fn verify(&self) -> Result<VerifyReport, Error> {
         let mut report = VerifyReport::default();
-        for kind in [ObjectKind::Blob, ObjectKind::Tree] {
-            for id in self.list(kind)? {
-                report.checked += 1;
-                let ok = self.verify_object(kind, &id).unwrap_or(false);
-                if !ok {
-                    report.corrupt.push(id);
+        for store in self.storage_views() {
+            for kind in [ObjectKind::Blob, ObjectKind::Tree] {
+                for id in store.list(kind)? {
+                    report.checked += 1;
+                    if !store.verify_object(kind, &id).unwrap_or(false) {
+                        report.corrupt.push(id);
+                    }
                 }
             }
         }
@@ -408,7 +453,7 @@ impl Store {
             let bytes = self.read_object(kind, id)?;
             return Ok(ObjectId::of(&bytes) == *id && Tree::decode(&bytes).is_ok());
         }
-        if let Some(encrypted) = &self.encrypted
+        if let Some(encrypted) = self.read_encrypted()
             && let Some(sealed) = Self::sealed_id(encrypted, kind, id)?
         {
             self.decrypt(encrypted, kind, id, &sealed, io::sink())?;
@@ -442,24 +487,26 @@ impl Store {
 
     /// Removes every object not reachable from `roots`. Also clears stale temporary files.
     pub fn prune(&self, roots: impl IntoIterator<Item = ObjectId>) -> Result<PruneReport, Error> {
-        let keep = self.reachable(roots)?;
+        self.prune_versions(roots.into_iter().map(|id| (id, None)))
+    }
+
+    /// Prunes physical copies independently. A root without recorded storage can retain
+    /// a copy in either class, including the descendants of a directory in that class.
+    pub fn prune_versions(
+        &self,
+        roots: impl IntoIterator<Item = (ObjectId, Option<Storage>)>,
+    ) -> Result<PruneReport, Error> {
+        let roots: Vec<_> = roots.into_iter().collect();
         let mut report = PruneReport::default();
-        for kind in [ObjectKind::Blob, ObjectKind::Tree] {
-            for id in self.list(kind)? {
-                if keep.contains(&id) {
-                    report.kept += 1;
-                    continue;
-                }
-                let path = self.object_path(kind, &id);
-                report.bytes_freed += remove(&path)?;
-                if let Some(encrypted) = &self.encrypted
-                    && let Some(sealed) = Self::sealed_id(encrypted, kind, &id)?
-                {
-                    report.bytes_freed += remove(&self.sealed_path(kind, &sealed))?;
-                    remove(&Self::index_path(encrypted, kind, &id))?;
-                }
-                report.removed.push(id);
-            }
+        let mut plans = Vec::new();
+        for store in self.storage_views() {
+            let keep = store.reachable(roots.iter().filter_map(|(id, storage)| {
+                (storage.is_none() || *storage == store.storage).then_some(*id)
+            }))?;
+            plans.push((store, keep));
+        }
+        for (store, keep) in plans {
+            store.remove_unreachable(&keep, &mut report)?;
         }
         let tmp = self.root.join("tmp");
         if let Ok(entries) = fs::read_dir(&tmp) {
@@ -468,6 +515,38 @@ impl Store {
             }
         }
         Ok(report)
+    }
+
+    fn storage_views(&self) -> impl Iterator<Item = Self> + '_ {
+        [Storage::Plain, Storage::Encrypted]
+            .into_iter()
+            .filter(|class| self.storage.is_none_or(|selected| selected == *class))
+            .map(|class| self.scoped(class))
+    }
+
+    fn remove_unreachable(
+        &self,
+        keep: &HashSet<ObjectId>,
+        report: &mut PruneReport,
+    ) -> Result<(), Error> {
+        for kind in [ObjectKind::Blob, ObjectKind::Tree] {
+            for id in self.list(kind)? {
+                if keep.contains(&id) {
+                    report.kept += 1;
+                    continue;
+                }
+                if self.storage == Some(Storage::Plain) {
+                    report.bytes_freed += remove(&self.object_path(kind, &id))?;
+                } else if let Some(encrypted) = self.read_encrypted()
+                    && let Some(sealed) = Self::sealed_id(encrypted, kind, &id)?
+                {
+                    report.bytes_freed += remove(&self.sealed_path(kind, &sealed))?;
+                    remove(&Self::index_path(encrypted, kind, &id))?;
+                }
+                report.removed.push(id);
+            }
+        }
+        Ok(())
     }
 }
 

@@ -129,6 +129,297 @@ select = { lines = "9-10" }
     }
 }
 
+fn plain_snapshot(root: &Path, body: &[u8]) -> PathBuf {
+    let hex = cas_fs::ObjectId::of(body).to_hex();
+    root.join(".evidence/objects/blob")
+        .join(&hex[..2])
+        .join(&hex[2..])
+}
+
+#[test]
+fn snapshot_encryption_follows_used_versions_and_keeps_metadata_private() {
+    use evidence_core::format::SnapshotStorage::{Encrypted, Plain};
+
+    let fx = Fixture::new();
+    for (id, storage) in [
+        ("public", "[storage]\nencryption = false\n"),
+        ("private", ""),
+    ] {
+        fx.write(
+            &format!("{id}.txt.evid"),
+            &format!(
+                r#"version = 2
+id = "{id}"
+{storage}
+[[productions]]
+name = "fetch"
+writes = ["subject"]
+run = ["printf", "same input"]
+stdout = true
+"#
+            ),
+        );
+    }
+    for (id, inputs, storage) in [
+        ("public-result", "\"public\"", ""),
+        ("mixed-result", "\"public\", \"private\"", ""),
+        (
+            "forced-result",
+            "\"public\"",
+            "[storage]\nencryption = true\n",
+        ),
+        (
+            "denied-result",
+            "\"private\"",
+            "[storage]\nencryption = false\n",
+        ),
+    ] {
+        fx.write(
+            &format!("{id}.txt.evid"),
+            &format!(
+                r#"version = 2
+id = "{id}"
+{storage}
+[[productions]]
+name = "derive"
+writes = ["subject"]
+inputs = [{inputs}]
+run = ["printf", "{id} body"]
+stdout = true
+"#
+            ),
+        );
+    }
+
+    let report = fx.update(|_| {});
+    let denied = report
+        .runs
+        .iter()
+        .find(|r| r.id == "denied-result")
+        .unwrap();
+    assert_eq!(denied.status, Some(RunStatus::Failed));
+    assert!(
+        denied
+            .message
+            .as_ref()
+            .unwrap()
+            .contains("`private` is encrypted")
+    );
+    assert!(!fx.root.join("denied-result.txt").exists());
+    assert!(!plain_snapshot(&fx.root, b"denied-result body").exists());
+    let project = fx.project();
+    for (id, storage, name) in [
+        ("public", Plain, "fetch"),
+        ("private", Encrypted, "fetch"),
+        ("public-result", Plain, "derive"),
+        ("mixed-result", Encrypted, "derive"),
+        ("forced-result", Encrypted, "derive"),
+    ] {
+        let state = project.pair(id).unwrap().file.state();
+        assert_eq!(
+            state.content.as_ref().unwrap().storage,
+            Some(storage),
+            "{id}"
+        );
+        assert_eq!(state.runs[name].subject_storage, Some(storage), "{id}");
+        let evid = fx.read(&format!("{id}.txt.evid"));
+        assert!(evid.contains("[state.protected]"), "{id}");
+        assert!(
+            !evid.contains("[state.protected.replay]"),
+            "all input bytes are publicly available: {id}"
+        );
+    }
+    let mixed = project.pair("mixed-result").unwrap().file.state();
+    let used = &mixed.runs["derive"].inputs;
+    assert_eq!(used["public"].snapshot, used["private"].snapshot);
+    assert_eq!(used["public"].storage, Some(Plain));
+    assert_eq!(used["private"].storage, Some(Encrypted));
+    assert_eq!(
+        std::fs::read(plain_snapshot(&fx.root, b"public-result body")).unwrap(),
+        b"public-result body"
+    );
+    assert!(!plain_snapshot(&fx.root, b"mixed-result body").exists());
+    assert!(!plain_snapshot(&fx.root, b"forced-result body").exists());
+
+    let checkout = Fixture::new();
+    for file in ["public.txt.evid", "public-result.txt.evid"] {
+        checkout.write(file, &fx.read(file));
+    }
+    let report = checkout.update(|_| {});
+    assert!(!report.has_failures(), "{report:?}");
+    assert_eq!(checkout.read("public-result.txt"), "public-result body");
+}
+
+#[test]
+fn policy_change_on_identical_bytes_cascades_and_preserves_the_previous_copy_in_history() {
+    use evidence_core::format::SnapshotStorage::Encrypted;
+
+    let fx = Fixture::new();
+    let source = r#"version = 2
+id = "raw"
+
+[[productions]]
+name = "fetch"
+writes = ["subject"]
+run = ["printf", "fixed bytes"]
+stdout = true
+"#;
+    fx.write(
+        "raw.txt.evid",
+        &format!("{source}\n[storage]\nencryption = false\n"),
+    );
+    fx.write(
+        "derived.txt.evid",
+        r#"version = 2
+id = "derived"
+
+[[productions]]
+name = "copy"
+writes = ["subject"]
+inputs = ["raw"]
+run = ["cp", "{input.raw}", "{output}"]
+"#,
+    );
+    assert!(!fx.update(|_| {}).has_failures());
+    let plain = plain_snapshot(&fx.root, b"fixed bytes");
+    assert!(plain.exists());
+    fx.write(
+        "raw.txt.evid",
+        &fx.read("raw.txt.evid")
+            .replace("encryption = false", "encryption = true"),
+    );
+    let report = fx.update(|_| {});
+    assert!(!report.has_failures(), "{report:?}");
+    assert_eq!(report.runs.len(), 2, "{report:?}");
+    for run in &report.runs {
+        assert_eq!(run.status, Some(RunStatus::Changed));
+        assert!(!run.content.as_ref().unwrap().changed);
+    }
+    let project = fx.project();
+    let state = project.pair("derived").unwrap().file.state();
+    assert_eq!(state.content.as_ref().unwrap().storage, Some(Encrypted));
+    assert_eq!(state.runs["copy"].inputs["raw"].storage, Some(Encrypted));
+    project.prune_store(false).unwrap();
+    assert!(plain.exists());
+    project.prune_store(true).unwrap();
+    assert!(!plain.exists());
+    let snapshot = state.content.unwrap().snapshot;
+    assert_eq!(
+        project.object(&snapshot.to_string()).unwrap(),
+        Object::File(b"fixed bytes".to_vec())
+    );
+}
+
+#[test]
+fn written_and_generated_claims_inherit_protection_before_a_snapshot_is_written() {
+    use evidence_core::format::SnapshotStorage::{Encrypted, Plain};
+
+    let fx = Fixture::new();
+    for (id, storage) in [
+        ("manual-private", ""),
+        ("manual-public", "[storage]\nencryption = false\n"),
+        ("manual-derived", ""),
+    ] {
+        let target = if id == "manual-derived" {
+            "manual-public"
+        } else {
+            id
+        };
+        fx.write(&format!("{id}.txt"), &format!("{id} body\n"));
+        fx.write(
+            &format!("{id}.txt.evid"),
+            &format!(
+                r#"version = 2
+id = "{id}"
+{storage}
+[[claims]]
+id = "boundary"
+select = {{ lines = "1" }}
+evidence = ["{target}"]
+"#
+            ),
+        );
+        fx.pin(&[id]);
+    }
+    let p = fx.project();
+    let private = p.pair("manual-private").unwrap().file.state();
+    assert_eq!(private.pins["boundary"].content.storage, Some(Encrypted));
+    let public = p.pair("manual-public").unwrap().file.state();
+    assert_eq!(public.pins["boundary"].content.storage, Some(Plain));
+    let derived = p.pair("manual-derived").unwrap().file.state();
+    assert_eq!(derived.pins["boundary"].content.storage, Some(Plain));
+    assert!(!plain_snapshot(&fx.root, b"manual-private body\n").exists());
+    assert!(plain_snapshot(&fx.root, b"manual-derived body\n").exists());
+
+    fx.write("draft.txt", "new manual text\n");
+    fx.write(
+        "draft.txt.evid",
+        r#"version = 2
+id = "draft"
+[storage]
+encryption = false
+
+[[claims]]
+id = "check"
+select = { lines = "1" }
+evidence = ["manual-private"]
+"#,
+    );
+    let pin = fx
+        .project()
+        .pin(&PinOptions {
+            targets: vec!["draft".into()],
+            ..PinOptions::default()
+        })
+        .unwrap();
+    assert!(pin.has_failures());
+    assert!(!plain_snapshot(&fx.root, b"new manual text\n").exists());
+
+    let revision = private.pins["boundary"].content.snapshot.unwrap();
+    fx.write(
+        "manual-private.txt.evid",
+        &fx.read("manual-private.txt.evid")
+            .replace("[[claims]]", "[storage]\nencryption = false\n\n[[claims]]"),
+    );
+    fx.write("emit.sh", &format!(r#"printf 'generated body\n' > "$1"
+printf '%s\n' '{{"claims":[{{"id":"out.check","select":{{"lines":"1"}},"evidence":[{{"ref":"manual-private","revision":"{revision}"}}]}}]}}' > "$2"
+"#));
+    let evid = r#"version = 2
+id = "generated"
+[storage]
+encryption = false
+
+[[productions]]
+name = "derive"
+writes = ["subject", "claims"]
+namespace = "out"
+inputs = ["manual-public"]
+run = ["sh", "emit.sh", "{output}", "{claims}"]
+"#;
+    fx.write("generated.txt.evid", evid);
+    let report = fx.update(|opts| opts.targets.push("generated".into()));
+    assert!(report.has_failures(), "{report:?}");
+    assert!(
+        report.runs[0]
+            .message
+            .as_ref()
+            .unwrap()
+            .contains("`manual-private` is encrypted")
+    );
+    assert!(!plain_snapshot(&fx.root, b"generated body\n").exists());
+    fx.write(
+        "generated.txt.evid",
+        &evid.replace("[storage]\nencryption = false\n", ""),
+    );
+    let report = fx.update(|opts| opts.targets.push("generated".into()));
+    assert!(!report.has_failures(), "{report:?}");
+    let p = fx.project();
+    let state = p.pair("generated").unwrap().file.state();
+    assert_eq!(state.content.as_ref().unwrap().storage, Some(Encrypted));
+    assert_eq!(state.pins["out.check"].evidence[0].storage, Some(Encrypted));
+    assert!(!plain_snapshot(&fx.root, b"generated body\n").exists());
+}
+
 #[test]
 fn full_pipeline_update_pin_and_coverage() {
     let fx = Fixture::new();

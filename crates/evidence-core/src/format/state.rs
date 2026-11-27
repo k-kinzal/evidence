@@ -78,6 +78,25 @@ impl State {
     }
 }
 
+/// The storage class of a recorded version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotStorage {
+    /// A plaintext snapshot.
+    Plain,
+    /// A snapshot encrypted by the local store.
+    Encrypted,
+}
+
+impl From<SnapshotStorage> for cas_fs::Storage {
+    fn from(storage: SnapshotStorage) -> Self {
+        match storage {
+            SnapshotStorage::Plain => Self::Plain,
+            SnapshotStorage::Encrypted => Self::Encrypted,
+        }
+    }
+}
+
 /// The adopted version of a produced subject.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -85,6 +104,9 @@ pub struct ContentRecord {
     /// Snapshot of the adopted content.
     #[schemars(with = "SnapshotIdSchema")]
     pub snapshot: ObjectId,
+    /// The storage class of this snapshot, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<SnapshotStorage>,
     /// When the adopted content last changed.
     #[schemars(with = "TimestampSchema")]
     pub updated_at: Timestamp,
@@ -117,6 +139,9 @@ pub struct RunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<SnapshotIdSchema>")]
     pub subject: Option<ObjectId>,
+    /// Storage class of the subject version written by the run, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_storage: Option<SnapshotStorage>,
     /// The version of each input actually used, by input name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub inputs: BTreeMap<String, InputVersion>,
@@ -143,6 +168,9 @@ pub struct InputVersion {
     /// Snapshot used.
     #[schemars(with = "SnapshotIdSchema")]
     pub snapshot: ObjectId,
+    /// The storage class of this input snapshot, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<SnapshotStorage>,
     /// Hash of the selected part, when the input selects one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<SnapshotIdSchema>")]
@@ -207,6 +235,9 @@ pub struct PinnedContent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<SnapshotIdSchema>")]
     pub snapshot: Option<ObjectId>,
+    /// The storage class of the subject snapshot, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<SnapshotStorage>,
     /// Hash of the claimed range.
     #[schemars(with = "SnapshotIdSchema")]
     pub fragment: ObjectId,
@@ -221,6 +252,9 @@ pub struct PinnedReference {
     /// Snapshot of the referenced subject.
     #[schemars(with = "SnapshotIdSchema")]
     pub snapshot: ObjectId,
+    /// The storage class of this referenced snapshot, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<SnapshotStorage>,
     /// Hash of the selected part (when the reference has a selector or path).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<SnapshotIdSchema>")]

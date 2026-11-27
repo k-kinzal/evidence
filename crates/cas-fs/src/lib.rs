@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 pub use cipher::EncryptionKey;
 pub use id::{ALGORITHM, Hasher, ObjectId, ParseObjectIdError};
 pub use store::{
-    Filter, ObjectKind, PruneReport, Store, VerifyReport, hash_path, hash_path_filtered,
+    Filter, ObjectKind, PruneReport, Storage, Store, VerifyReport, hash_path, hash_path_filtered,
     include_all,
 };
 pub use tree::{EntryKind, Tree, TreeEntry};
@@ -60,6 +60,9 @@ pub enum Error {
     /// A stored object is malformed.
     #[error("corrupt object: {0}")]
     Corrupt(&'static str),
+    /// An encrypted write requires an encryption key.
+    #[error("object store encryption is unavailable")]
+    EncryptionUnavailable,
 }
 
 impl Error {

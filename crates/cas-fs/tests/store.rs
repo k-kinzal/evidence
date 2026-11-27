@@ -97,6 +97,45 @@ fn verify_detects_corruption_and_prune_removes_unreachable() {
     assert!(!store.contains(&drop));
 }
 
+#[test]
+fn storage_classes_verify_and_prune_identical_trees_independently() {
+    use cas_fs::{EncryptionKey, ObjectId, Storage};
+    use zeroize::Zeroizing;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("objects"))
+        .unwrap()
+        .with_encryption(
+            EncryptionKey::new(Zeroizing::new([42; 32])),
+            tmp.path().join("lookup"),
+            true,
+        )
+        .unwrap();
+    let tree = tmp.path().join("tree");
+    write(&tree.join("child.txt"), "identical");
+    let plain = store.scoped(Storage::Plain);
+    let encrypted = store.scoped(Storage::Encrypted);
+    let root = plain.put_path(&tree).unwrap();
+    let child = ObjectId::of(b"identical");
+    assert!(encrypted.read_blob(&child).is_err());
+    assert_eq!(encrypted.put_path(&tree).unwrap(), root);
+    assert_eq!(store.verify().unwrap().checked, 4);
+
+    let hex = child.to_hex();
+    let raw = store.root().join("blob").join(&hex[..2]).join(&hex[2..]);
+    fs::write(&raw, b"tampered").unwrap();
+    assert_eq!(store.verify().unwrap().corrupt, vec![child]);
+    assert_eq!(encrypted.read_blob(&child).unwrap(), b"identical");
+    let report = store
+        .prune_versions([(root, Some(Storage::Encrypted))])
+        .unwrap();
+    assert_eq!(report.removed.len(), 2);
+    assert!(!plain.contains(&root));
+    assert!(!plain.contains(&child));
+    assert_eq!(encrypted.resolve(&root, "child.txt").unwrap().1, child);
+    assert_eq!(store.verify().unwrap().checked, 2);
+}
+
 #[cfg(unix)]
 #[test]
 fn preserves_symlinks_and_exec_bit() {

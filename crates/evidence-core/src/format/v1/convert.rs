@@ -90,6 +90,7 @@ pub fn to_v2(f: &V1File) -> Converted {
         author: f.author.clone(),
         subject: f.subject.clone(),
         format: f.format,
+        storage: None,
         productions: Vec::new(),
         verify: f.verify.as_ref().map(|v| Action {
             run: v.run.clone(),
@@ -271,6 +272,7 @@ fn convert_state(
                 .unwrap_or(Timestamp::UNIX_EPOCH);
             state.content = Some(ContentRecord {
                 snapshot,
+                storage: None,
                 updated_at: changed,
                 production: Some(name.to_owned()),
                 run: None,
@@ -289,6 +291,7 @@ fn convert_state(
                         InputVersion {
                             id: id.clone(),
                             snapshot: *snap,
+                            storage: None,
                             fragment: None,
                             fixed: false,
                         },
@@ -303,6 +306,7 @@ fn convert_state(
                     fingerprint: None,
                     fingerprint_version: None,
                     subject: Some(snapshot),
+                    subject_storage: None,
                     inputs,
                     claims: None,
                     namespace: None,
@@ -341,6 +345,7 @@ fn convert_state(
                 fingerprint_version: None,
                 content: PinnedContent {
                     snapshot: None,
+                    storage: None,
                     fragment: cs.content,
                 },
                 anchor: cs.anchor.clone(),
@@ -353,6 +358,7 @@ fn convert_state(
                             .cloned()
                             .unwrap_or_else(|| p.key.clone()),
                         snapshot: p.snapshot,
+                        storage: None,
                         fragment: p.fragment,
                     })
                     .collect(),
