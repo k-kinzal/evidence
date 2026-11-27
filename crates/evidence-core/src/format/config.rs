@@ -99,6 +99,16 @@ pub struct StoreConfig {
     /// Defaults to `.evidence/objects`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Encrypt newly written snapshots and managed metadata. Defaults to `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<bool>,
+}
+
+impl StoreConfig {
+    /// Whether new objects and metadata are encrypted.
+    pub fn encryption_enabled(&self) -> bool {
+        self.encryption.unwrap_or(true)
+    }
 }
 
 /// `[discovery]`

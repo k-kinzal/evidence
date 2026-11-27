@@ -75,6 +75,40 @@ Every command accepts `--json`. The output is an envelope `{"version": 2, "<key>
 (failed runs, failed pins, blocked migrations, validation errors, denied states), `2` the
 command could not run (including usage errors such as `update --pin --force`).
 
+## Snapshot encryption
+
+`evidence update` and `evidence update --pin` automatically encrypt newly stored snapshots,
+tool-managed `.evid` state, and new history records. Ordinary commands read them through the
+same project interface. The random project key and plaintext-digest index live in the
+Git-ignored `.evidence/private/` directory. Keep that directory with the worktree to read
+its local history and snapshots. Older plaintext snapshots and state are readable.
+
+To turn encryption off for new writes, set this in `.evidence/config.toml` or your local
+configuration layer.
+
+```toml
+[store]
+encryption = false
+```
+
+For an accepted file with recorded input file versions, an update also stores a replay object
+under `.evidence/objects/replay/`. Its name is the digest of the ciphertext. The corresponding
+`.evid` state identifies the required inputs. In another checkout, the usual `evidence update`
+can reacquire those inputs with its configured productions and recover the accepted file from
+the exact input bytes. For a time-series query, keep the source version or as-of time, range,
+and output settings in the ordinary acquisition definition. With an incorrect input version,
+the accepted artifact stays locked and the update reports which artifact needs its inputs.
+
+Replay objects use salted Argon2id key derivation and authenticated encryption. Use them with
+inputs that are difficult to guess. A reader who retains the exact inputs can reopen the
+version later. Portable replay supports regular-file snapshots with one recorded version per
+input ID and a combined body limit of 128 MiB. The local store also encrypts directory
+snapshots and larger inputs.
+
+Materialized working files and hand-written definitions are ordinary files. Keep private
+working files, definitions, and any older plaintext already in Git out of the shared history.
+Share the definitions you have approved for publication and the replay objects they reference.
+
 ## Wiki
 
 `evidence-wiki` turns a project into a wiki that agents write and keep up to date while

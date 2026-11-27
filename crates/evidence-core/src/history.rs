@@ -120,6 +120,20 @@ pub(crate) fn append(layout: &Layout, id: &str, event: &Event) -> Result<()> {
     std::fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
     let path = dir.join(format!("{id}.jsonl"));
     let mut line = serde_json::to_string(event).map_err(|e| Error::Invalid(e.to_string()))?;
+    if layout.config().config.store.encryption_enabled() {
+        let key = layout
+            .key()
+            .ok_or_else(|| Error::Invalid("project key unavailable".into()))?;
+        let context = format!("evidence-history-v1\0{id}");
+        let ciphertext = key
+            .seal(context.as_bytes(), line.as_bytes())
+            .map_err(|e| Error::io(&path, e))?;
+        line = format!(
+            "sealed-v1:{}:{}",
+            key.id().to_hex(),
+            hex::encode(ciphertext)
+        );
+    }
     line.push('\n');
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -134,10 +148,34 @@ pub(crate) fn append(layout: &Layout, id: &str, event: &Event) -> Result<()> {
 pub(crate) fn read(layout: &Layout, id: &str) -> Result<Vec<Event>> {
     let path = layout.history_dir().join(format!("{id}.jsonl"));
     match std::fs::read_to_string(&path) {
-        Ok(text) => Ok(text
-            .lines()
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect()),
+        Ok(text) => {
+            let mut events = Vec::new();
+            let context = format!("evidence-history-v1\0{id}");
+            let owner = layout.key().map(|key| (key, key.id().to_hex()));
+            for line in text.lines() {
+                if let Some(sealed) = line.strip_prefix("sealed-v1:") {
+                    let Some((key, owner)) = &owner else { continue };
+                    let Some((id, data)) = sealed.split_once(':') else {
+                        continue;
+                    };
+                    if id != owner {
+                        continue;
+                    }
+                    let data = hex::decode(data)
+                        .map_err(|_| Error::Invalid("invalid protected history".into()))?;
+                    let data = key
+                        .open(context.as_bytes(), &data)
+                        .map_err(|e| Error::io(&path, e))?;
+                    events.push(
+                        serde_json::from_slice(&data)
+                            .map_err(|_| Error::Invalid("invalid protected history".into()))?,
+                    );
+                } else if let Ok(event) = serde_json::from_str(line) {
+                    events.push(event);
+                }
+            }
+            Ok(events)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(Error::io(&path, e)),
     }

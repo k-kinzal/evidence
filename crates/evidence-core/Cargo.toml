@@ -16,7 +16,10 @@ index = ["dep:rusqlite"]
 
 [dependencies]
 cas-fs = { workspace = true, features = ["serde"] }
+argon2.workspace = true
 figment.workspace = true
+getrandom.workspace = true
+hex.workspace = true
 ignore.workspace = true
 jiff.workspace = true
 jsonschema = { workspace = true, features = ["resolve-file"] }
@@ -30,6 +33,7 @@ thiserror.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
 tracing.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

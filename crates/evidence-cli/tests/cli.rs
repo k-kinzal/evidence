@@ -808,3 +808,147 @@ fn subject_coverage_honours_scope_and_reports_narrow_share() {
     let all = &p.json(&["coverage", "page", "source"])["coverage"];
     assert_eq!(all["reports"].as_array().unwrap().len(), 2);
 }
+
+#[test]
+fn normal_update_encrypts_objects_and_metadata_and_recovers_accepted_file() {
+    use evidence_core::format::ObjectId;
+
+    let p = Project::new();
+    let independent = TempDir::new().unwrap();
+    let origin = independent.path().join("fixed.txt");
+    let source = b"fixture with unpredictability 0f7db5a8e3c90df0ad2ea3afff64f7b2\n";
+    std::fs::write(&origin, source).unwrap();
+    p.cmd(&[
+        "add",
+        "raw.txt",
+        "--kind",
+        "source",
+        "--",
+        "cp",
+        origin.to_str().unwrap(),
+        "{output}",
+    ])
+    .assert()
+    .success();
+    p.write(
+        "write.sh",
+        "printf '%s\\n' '# Accepted' '' 'Approved private article.' > \"$1\"\nprintf 'ran' >> producer-ran\n",
+    );
+    p.cmd(&[
+        "add",
+        "article.md",
+        "--kind",
+        "derived",
+        "--input",
+        "raw",
+        "--",
+        "sh",
+        "write.sh",
+        "{output}",
+    ])
+    .assert()
+    .success();
+    p.cmd(&["update"]).assert().success();
+    let article = std::fs::read(p.dir.path().join("article.md")).unwrap();
+    let snapshot = ObjectId::of(&article);
+    let plain_hash = ObjectId::of(source).to_hex();
+    let evidence = std::fs::read_to_string(p.dir.path().join("article.md.evid")).unwrap();
+    assert!(evidence.contains("[state.protected.replay]"));
+    assert!(!evidence.contains(&plain_hash));
+    assert!(!evidence.contains(&snapshot.to_hex()));
+    assert!(
+        !p.dir
+            .path()
+            .join(".evidence/objects/blob")
+            .join(&plain_hash[..2])
+            .join(&plain_hash[2..])
+            .exists()
+    );
+    let history =
+        std::fs::read_to_string(p.dir.path().join(".evidence/history/article.jsonl")).unwrap();
+    assert!(history.starts_with("sealed-v1:"));
+    assert!(!history.contains(&snapshot.to_hex()));
+    p.cmd(&["cat", &snapshot.to_string()])
+        .assert()
+        .success()
+        .stdout(article.clone());
+    p.cmd(&["store", "verify"]).assert().success();
+
+    // Simulate a fresh checkout with its normal definitions and the shared ciphertext only.
+    let restored = Project::new();
+    for file in ["raw.txt.evid", "article.md.evid", "write.sh"] {
+        std::fs::copy(p.dir.path().join(file), restored.dir.path().join(file)).unwrap();
+    }
+    let objects = p.dir.path().join(".evidence/objects/replay/blob");
+    for prefix in std::fs::read_dir(objects).unwrap() {
+        let prefix = prefix.unwrap();
+        let out = restored
+            .dir
+            .path()
+            .join(".evidence/objects/replay/blob")
+            .join(prefix.file_name());
+        std::fs::create_dir_all(&out).unwrap();
+        for object in std::fs::read_dir(prefix.path()).unwrap() {
+            let object = object.unwrap();
+            let ciphertext = std::fs::read(object.path()).unwrap();
+            let id = ObjectId::of(&ciphertext).to_hex();
+            let mut actual_name = prefix.file_name().into_string().unwrap();
+            actual_name.push_str(&object.file_name().into_string().unwrap());
+            assert_eq!(actual_name, id);
+            assert!(
+                !ciphertext
+                    .windows(24)
+                    .any(|bytes| bytes == b"Approved private article")
+            );
+            std::fs::write(out.join(object.file_name()), ciphertext).unwrap();
+        }
+    }
+    std::fs::write(&origin, b"wrong fixed version\n").unwrap();
+    restored
+        .cmd(&["update"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("exact input versions"));
+    assert!(!restored.dir.path().join("article.md").exists());
+    assert!(!restored.dir.path().join("producer-ran").exists());
+    std::fs::write(&origin, source).unwrap();
+    restored.cmd(&["update", "raw"]).assert().success();
+    assert_eq!(
+        std::fs::read(restored.dir.path().join("article.md")).unwrap(),
+        article
+    );
+    assert!(!restored.dir.path().join("producer-ran").exists());
+    assert_eq!(
+        std::fs::read_to_string(restored.dir.path().join("article.md.evid")).unwrap(),
+        evidence
+    );
+    restored
+        .cmd(&["cat", &snapshot.to_string()])
+        .assert()
+        .success()
+        .stdout(article.clone());
+
+    p.write(
+        ".evidence/config.local.toml",
+        "[store]\nencryption = false\n",
+    );
+    p.cmd(&["cat", &snapshot.to_string()])
+        .assert()
+        .success()
+        .stdout(article);
+    let new = b"plain opt-out fixture\n";
+    std::fs::write(&origin, new).unwrap();
+    p.cmd(&["update", "raw", "--isolated"]).assert().success();
+    let hash = ObjectId::of(new).to_hex();
+    assert_eq!(
+        std::fs::read(
+            p.dir
+                .path()
+                .join(".evidence/objects/blob")
+                .join(&hash[..2])
+                .join(&hash[2..])
+        )
+        .unwrap(),
+        new,
+    );
+}

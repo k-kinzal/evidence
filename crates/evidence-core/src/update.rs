@@ -150,7 +150,7 @@ pub struct RunReport {
 pub struct Skipped {
     /// Evidence id.
     pub id: String,
-    /// Stable code: `nothing-to-run`, `legacy-format`.
+    /// Stable code: `nothing-to-run`, `legacy-format`, `locked-snapshot`.
     pub code: String,
     /// Explanation.
     pub message: String,
@@ -172,14 +172,18 @@ pub struct UpdateReport {
     /// Members of lists that were added, moved, or removed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<MemberChange>,
+    /// Accepted encrypted snapshots recovered from their exact inputs during this update.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub restored: Vec<String>,
 }
 
 impl UpdateReport {
-    /// Whether any run failed.
+    /// Whether a run failed or a selected encrypted snapshot stayed locked.
     pub fn has_failures(&self) -> bool {
         self.runs
             .iter()
             .any(|r| r.status == Some(RunStatus::Failed))
+            || (!self.dry_run && self.skipped.iter().any(|s| s.code == "locked-snapshot"))
     }
 }
 
@@ -219,7 +223,10 @@ pub(crate) fn update(
         if let Some(legacy) = pairs.iter().find(|p| p.legacy) {
             return Err(Error::Legacy(legacy.evid_rel.clone()));
         }
-        for p in pairs.iter().filter(|p| p.file.productions.is_empty()) {
+        for p in pairs
+            .iter()
+            .filter(|p| p.file.productions.is_empty() && !locked(p))
+        {
             report.skipped.push(Skipped {
                 id: p.id.clone(),
                 code: "nothing-to-run".into(),
@@ -263,6 +270,13 @@ pub(crate) fn update(
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get))
         .max(1);
 
+    let isolated = (opts.isolated && explicit).then_some(&selected);
+    let mut tried_replay = BTreeMap::new();
+    let mut restored = if opts.dry_run {
+        HashSet::new()
+    } else {
+        crate::replay::restore_available(layout, &mut ws, isolated, &mut tried_replay)?
+    };
     let mut levels = ws.run_levels()?;
     let mut changed: HashSet<Node> = HashSet::new();
     let mut ran: HashSet<Node> = HashSet::new();
@@ -282,6 +296,12 @@ pub(crate) fn update(
                 continue;
             };
             if pair.legacy {
+                continue;
+            }
+            if locked(pair) {
+                continue;
+            }
+            if restored.contains(&pair.id) && !opts.force {
                 continue;
             }
             let Some(production) = pair.file.production(&node.production) else {
@@ -344,8 +364,11 @@ pub(crate) fn update(
             }
             report.runs.push(run);
             // Later levels see what this run adopted.
-            ws.reload_pair(&node.pair);
+            ws.reload_pair(layout, &node.pair);
         }
+        let recovered =
+            crate::replay::restore_available(layout, &mut ws, isolated, &mut tried_replay)?;
+        restored.extend(recovered);
         if sync_members(layout, &ws, &lists, now, &mut report) {
             ws = Workspace::load(layout)?;
             levels = ws.run_levels()?;
@@ -364,7 +387,34 @@ pub(crate) fn update(
         .map(|n| n.pair.clone())
         .collect();
     report.affected = affected(&ws, &changed_pairs, &ran_pairs);
+    report.restored = restored.into_iter().collect();
+    report.restored.sort();
+    report
+        .skipped
+        .retain(|s| s.code != "nothing-to-run" || !report.restored.contains(&s.id));
+    for pair in ws
+        .pairs()
+        .iter()
+        .filter(|p| selected.contains(&p.id) && locked(p))
+    {
+        report.skipped.push(Skipped {
+            id: pair.id.clone(),
+            code: "locked-snapshot".into(),
+            message: format!(
+                "{} needs the exact input versions for its accepted snapshot",
+                pair.id
+            ),
+        });
+    }
     Ok(report)
+}
+
+fn locked(pair: &Pair) -> bool {
+    pair.file
+        .state
+        .as_ref()
+        .and_then(|s| s.protected.as_ref())
+        .is_some_and(|p| p.replay.is_some())
 }
 
 /// Brings the members of `parents` in step with their lists. Returns whether any evidence
@@ -943,7 +993,7 @@ fn adopt(
             report.run = Some(staged.run.clone());
             report.inputs = inputs_used(&staged.inputs);
             let tmp = staged.tmp.clone();
-            let adopted = adopt_staged(layout, pair, node, &staged, now, &mut report);
+            let adopted = adopt_staged(layout, ws.store(), pair, node, &staged, now, &mut report);
             let _ = std::fs::remove_dir_all(&tmp);
             adopted
         }
@@ -961,7 +1011,8 @@ fn adopt(
             report.content = None;
             report.claims = None;
             report.pinned.clear();
-            if let Err(e) = record_failure(pair, node, report.run.as_deref(), &message, now) {
+            if let Err(e) = record_failure(layout, pair, node, report.run.as_deref(), &message, now)
+            {
                 tracing::warn!(id = %pair.id, error = %e, "recording a failed attempt");
             }
             report.message = Some(message);
@@ -983,7 +1034,7 @@ fn adopt(
     if report.status != Some(RunStatus::Failed)
         && let Some(state) = std::fs::read_to_string(&pair.evid_path)
             .ok()
-            .and_then(|t| document::state_in(&t).ok())
+            .and_then(|t| crate::protection::state_in(layout, &t).ok())
     {
         event.locator = state
             .runs
@@ -1015,6 +1066,7 @@ fn inputs_used(inputs: &BTreeMap<String, InputVersion>) -> Vec<InputUsed> {
 
 fn adopt_staged(
     layout: &Layout,
+    store: &cas_fs::Store,
     pair: &Pair,
     node: &Node,
     staged: &Staged,
@@ -1033,7 +1085,8 @@ fn adopt_staged(
         .file
         .production(&node.production)
         .ok_or("the production disappeared during the run")?;
-    let mut state = document::state_in(&text).map_err(|e| format!("{}: {e}", pair.evid_rel))?;
+    let mut state = crate::protection::writable_state(layout, &text)
+        .map_err(|e| format!("{}: {e}", pair.evid_rel))?;
     let mut changed = false;
 
     let mut tx = Transaction::begin(layout, "run").map_err(|e| e.to_string())?;
@@ -1118,8 +1171,15 @@ fn adopt_staged(
     if let Some(current) = pair.membership.as_ref().and_then(|m| m.current.clone()) {
         state.member = Some(current);
     }
-    let new_text =
-        document::replace_state(&text, &state).map_err(|e| format!("{}: {e}", pair.evid_rel))?;
+    let snapshot = state
+        .content
+        .as_ref()
+        .map(|c| c.snapshot)
+        .or_else(|| disk_snapshot(&pair.subject_path));
+    let replay =
+        crate::replay::publish(layout, store, pair, &state, snapshot).map_err(|e| e.to_string())?;
+    let new_text = crate::protection::replace_state(layout, &text, &state, replay)
+        .map_err(|e| format!("{}: {e}", pair.evid_rel))?;
     tx.stage_bytes(&pair.evid_path, new_text.as_bytes())
         .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
@@ -1132,6 +1192,7 @@ fn adopt_staged(
 
 /// Records a failed attempt. Adopted content, run records, claims, and pins stay as they were.
 fn record_failure(
+    layout: &Layout,
     pair: &Pair,
     node: &Node,
     run: Option<&str>,
@@ -1140,7 +1201,7 @@ fn record_failure(
 ) -> Result<()> {
     let text =
         std::fs::read_to_string(&pair.evid_path).map_err(|e| Error::io(&pair.evid_path, e))?;
-    let mut state = document::state_in(&text).map_err(Error::Invalid)?;
+    let mut state = crate::protection::writable_state(layout, &text).map_err(Error::Invalid)?;
     state.failures.insert(
         node.production.clone(),
         FailedAttempt {
@@ -1149,7 +1210,13 @@ fn record_failure(
             message: message.to_owned(),
         },
     );
-    let new_text = document::replace_state(&text, &state).map_err(Error::Invalid)?;
+    let new_text = crate::protection::replace_state(
+        layout,
+        &text,
+        &state,
+        crate::protection::previous_replay(&text),
+    )
+    .map_err(Error::Invalid)?;
     document::atomic_write(&pair.evid_path, new_text.as_bytes())?;
     Ok(())
 }
@@ -1222,12 +1289,12 @@ fn write_context(
 
 impl Workspace {
     /// Re-reads one pair's evidence file (after an adoption changed its state).
-    pub(crate) fn reload_pair(&mut self, id: &str) {
+    pub(crate) fn reload_pair(&mut self, layout: &Layout, id: &str) {
         let Some(pair) = self.get(id) else { return };
         let Ok(text) = std::fs::read_to_string(&pair.evid_path) else {
             return;
         };
-        let Ok(state) = document::state_in(&text) else {
+        let Ok(state) = crate::protection::state_in(layout, &text) else {
             return;
         };
         if let Some(pair) = self.get_mut(id) {

@@ -671,6 +671,36 @@
       ],
       "type": "object"
     },
+    "ProtectedState": {
+      "additionalProperties": false,
+      "description": "The public wrapper for an authenticated, encrypted state record.",
+      "properties": {
+        "ciphertext": {
+          "description": "Hex-encoded authenticated ciphertext.",
+          "type": "string"
+        },
+        "key": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "Identifier of the random local key that sealed this record."
+        },
+        "replay": {
+          "$ref": "#/$defs/ReplayState",
+          "description": "Optional reproducible version recoverable from its existing inputs."
+        },
+        "version": {
+          "description": "Format version of the protected record.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "ciphertext"
+      ],
+      "type": "object"
+    },
     "Reference": {
       "anyOf": [
         {
@@ -716,6 +746,28 @@
       },
       "required": [
         "ref"
+      ],
+      "type": "object"
+    },
+    "ReplayState": {
+      "additionalProperties": false,
+      "description": "A protected revision and the source files needed to reopen it.",
+      "properties": {
+        "inputs": {
+          "description": "Evidence IDs whose exact file contents unlock that revision.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "object": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "SHA-256 of the encrypted replay payload."
+        }
+      },
+      "required": [
+        "object",
+        "inputs"
       ],
       "type": "object"
     },
@@ -952,6 +1004,10 @@
           },
           "description": "The pin of each claim, by claim id.",
           "type": "object"
+        },
+        "protected": {
+          "$ref": "#/$defs/ProtectedState",
+          "description": "Encrypted representation of this state when the project protects its metadata."
         },
         "runs": {
           "additionalProperties": {

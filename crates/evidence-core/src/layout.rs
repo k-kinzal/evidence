@@ -19,6 +19,9 @@ const CONFIG_TEMPLATE: &str = r#"# Evidence project configuration (shared with t
 [execution]
 # jobs = 4          # parallel updates (default: number of CPUs)
 # timeout = "10m"   # default limit per command
+
+[store]
+# encryption = true # encrypt new snapshots and managed state
 "#;
 
 const GITIGNORE: &str = "# Local, regenerable, or per-user files.
@@ -26,6 +29,10 @@ index.db
 index.db-*
 tmp/
 cache/
+private/
+journal/
+backup/
+objects/tmp/
 lock
 config.local.toml
 # Uncomment to keep snapshots out of git (share them another way):
@@ -252,6 +259,7 @@ fn parse_toml_value(value: &str) -> toml_edit::Value {
 pub(crate) struct Layout {
     root: PathBuf,
     config: LoadedConfig,
+    key: Option<cas_fs::EncryptionKey>,
 }
 
 impl Layout {
@@ -275,7 +283,11 @@ impl Layout {
             return Err(Error::NoProject(root));
         }
         let config = LoadedConfig::load(Some(&root))?;
-        Ok(Self { root, config })
+        let key = crate::protection::project_key(
+            &root.join(DIR),
+            config.config.store.encryption_enabled(),
+        )?;
+        Ok(Self { root, config, key })
     }
 
     /// Creates `.evidence/` in `root`.
@@ -319,7 +331,28 @@ impl Layout {
 
     /// Opens the object store.
     pub(crate) fn store(&self) -> Result<cas_fs::Store> {
-        Ok(cas_fs::Store::open(self.store_dir())?)
+        let root = self.store_dir();
+        let store = cas_fs::Store::open(&root)?;
+        if let Some(key) = &self.key {
+            let canonical = fs::canonicalize(&root).map_err(|e| Error::io(&root, e))?;
+            let store_identity = canonical.strip_prefix(&self.root).unwrap_or(&canonical);
+            let namespace =
+                cas_fs::ObjectId::of(store_identity.as_os_str().as_encoded_bytes()).to_hex();
+            let enabled = self.config.config.store.encryption_enabled();
+            if enabled {
+                crate::protection::ignore_local(&root, b"/blob/\n/tree/\n/sealed/\n/tmp/\n")?;
+            }
+            return Ok(store.with_encryption(
+                key.clone(),
+                self.meta_dir().join("private/lookup").join(namespace),
+                enabled,
+            )?);
+        }
+        Ok(store)
+    }
+
+    pub(crate) fn key(&self) -> Option<&cas_fs::EncryptionKey> {
+        self.key.as_ref()
     }
 
     /// History directory.

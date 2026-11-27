@@ -246,7 +246,18 @@ fn run_update(ctx: &Ctx, args: crate::cli::UpdateArgs) -> Result<i32> {
     for s in &report.skipped {
         say!("{} {}", o.paint("note     ", Style::Cyan), s.message);
     }
-    if report.runs.is_empty() && report.members.is_empty() && report.skipped.is_empty() {
+    for id in &report.restored {
+        say!(
+            "{} {}",
+            o.paint("restored ", Style::Green),
+            o.paint(id, Style::Bold)
+        );
+    }
+    if report.runs.is_empty()
+        && report.members.is_empty()
+        && report.skipped.is_empty()
+        && report.restored.is_empty()
+    {
         say!("Everything is up to date.");
     }
     for run in &report.runs {

@@ -263,7 +263,7 @@ impl Workspace {
         let parsed: Vec<_> = paths
             .iter()
             .map(|path| {
-                let parsed = document::read(path);
+                let parsed = crate::protection::read(layout, path);
                 let subject = parsed.file.as_ref().and_then(|f| subject_of(path, f));
                 (path, parsed, subject)
             })

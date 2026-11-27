@@ -143,3 +143,50 @@ proptest! {
         prop_assert_eq!(hash_path(&a).unwrap(), hash_path(&b).unwrap());
     }
 }
+
+#[test]
+fn encrypted_stream_authenticates_the_final_chunk_and_keeps_logical_ids() {
+    use cas_fs::{EncryptionKey, ObjectId};
+    use zeroize::Zeroizing;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let objects = tmp.path().join("objects");
+    let lookup = tmp.path().join("lookup");
+    let key = EncryptionKey::new(Zeroizing::new([42; 32]));
+    let store = Store::open(&objects)
+        .unwrap()
+        .with_encryption(key, lookup.clone(), true)
+        .unwrap();
+    for len in [0, 64 * 1024 - 1, 64 * 1024, 64 * 1024 + 1] {
+        let bytes = vec![100; len];
+        let id = store.put_bytes(&bytes).unwrap();
+        assert_eq!(id, ObjectId::of(&bytes));
+        assert_eq!(store.read_blob(&id).unwrap(), bytes);
+        let hex = id.to_hex();
+        assert!(
+            !objects
+                .join("blob")
+                .join(&hex[..2])
+                .join(&hex[2..])
+                .exists()
+        );
+    }
+
+    let id = ObjectId::of(&vec![100; 64 * 1024]);
+    let hex = id.to_hex();
+    let index = lookup.join("blob").join(&hex[..2]).join(&hex[2..]);
+    let original_id: ObjectId = fs::read_to_string(&index).unwrap().parse().unwrap();
+    let original_hex = original_id.to_hex();
+    let sealed = objects.join("sealed/blob");
+    let original_path = sealed.join(&original_hex[..2]).join(&original_hex[2..]);
+    let mut object = fs::read(original_path).unwrap();
+    object.truncate(object.len() - 16);
+    let damage = ObjectId::of(&object);
+    let damage_hex = damage.to_hex();
+    let parent = sealed.join(&damage_hex[..2]);
+    fs::create_dir_all(&parent).unwrap();
+    fs::write(parent.join(&damage_hex[2..]), object).unwrap();
+    fs::write(index, damage.to_string()).unwrap();
+    assert!(store.read_blob(&id).is_err());
+    assert_eq!(store.verify().unwrap().corrupt, vec![id]);
+}

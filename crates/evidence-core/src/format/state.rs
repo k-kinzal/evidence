@@ -21,6 +21,9 @@ pub const FINGERPRINT_VERSION: u32 = 1;
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct State {
+    /// Encrypted representation of this state when the project protects its metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected: Option<ProtectedState>,
     /// Produced subjects: the version adopted by the last successful run that wrote it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentRecord>,
@@ -39,6 +42,33 @@ pub struct State {
     /// Members: the parent's list entry this member was last produced from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member: Option<MemberState>,
+}
+
+/// The public wrapper for an authenticated, encrypted state record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProtectedState {
+    /// Format version of the protected record.
+    pub version: u32,
+    /// Identifier of the random local key that sealed this record.
+    #[schemars(with = "SnapshotIdSchema")]
+    pub key: ObjectId,
+    /// Hex-encoded authenticated ciphertext.
+    pub ciphertext: String,
+    /// Optional reproducible version recoverable from its existing inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<ReplayState>,
+}
+
+/// A protected revision and the source files needed to reopen it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayState {
+    /// SHA-256 of the encrypted replay payload.
+    #[schemars(with = "SnapshotIdSchema")]
+    pub object: ObjectId,
+    /// Evidence IDs whose exact file contents unlock that revision.
+    pub inputs: Vec<String>,
 }
 
 impl State {

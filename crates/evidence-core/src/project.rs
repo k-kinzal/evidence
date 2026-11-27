@@ -464,7 +464,10 @@ impl Project {
 
     /// Checks that every stored object still matches its id.
     pub fn verify_store(&self) -> Result<StoreCheck> {
-        let report = self.layout.store()?.verify()?;
+        let mut report = self.layout.store()?.verify()?;
+        let replay = crate::replay::verify(&self.layout)?;
+        report.checked += replay.checked;
+        report.corrupt.extend(replay.corrupt);
         Ok(StoreCheck {
             checked: report.checked,
             corrupt: report.corrupt.iter().map(ToString::to_string).collect(),

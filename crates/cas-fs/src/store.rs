@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use tempfile::NamedTempFile;
 
 use crate::tree::{EntryKind, Tree, TreeEntry};
-use crate::{Error, Hasher, ObjectId};
+use crate::{EncryptionKey, Error, Hasher, ObjectId};
 
 /// Kind of a stored object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -65,6 +65,14 @@ pub struct PruneReport {
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
+    encrypted: Option<Encrypted>,
+}
+
+#[derive(Debug, Clone)]
+struct Encrypted {
+    key: EncryptionKey,
+    index: PathBuf,
+    write: bool,
 }
 
 impl Store {
@@ -74,7 +82,30 @@ impl Store {
         for dir in ["blob", "tree", "tmp"] {
             fs::create_dir_all(root.join(dir)).map_err(|e| Error::io(&root, e))?;
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            encrypted: None,
+        })
+    }
+
+    /// Enables authenticated reads of encrypted objects and optionally encrypts new writes.
+    /// Keep the logical-id index private. Stored ciphertexts are named by their own SHA-256.
+    pub fn with_encryption(
+        mut self,
+        key: EncryptionKey,
+        index: PathBuf,
+        write: bool,
+    ) -> Result<Self, Error> {
+        for kind in [ObjectKind::Blob, ObjectKind::Tree] {
+            for dir in [
+                index.join(kind.dir()),
+                self.root.join("sealed").join(kind.dir()),
+            ] {
+                fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
+            }
+        }
+        self.encrypted = Some(Encrypted { key, index, write });
+        Ok(self)
     }
 
     /// The store root directory.
@@ -83,15 +114,42 @@ impl Store {
     }
 
     fn object_path(&self, kind: ObjectKind, id: &ObjectId) -> PathBuf {
-        let hex = id.to_hex();
-        self.root.join(kind.dir()).join(&hex[..2]).join(&hex[2..])
+        split_path(&self.root.join(kind.dir()), id)
+    }
+
+    fn index_path(encrypted: &Encrypted, kind: ObjectKind, id: &ObjectId) -> PathBuf {
+        split_path(&encrypted.index.join(kind.dir()), id)
+    }
+
+    fn sealed_path(&self, kind: ObjectKind, id: &ObjectId) -> PathBuf {
+        split_path(&self.root.join("sealed").join(kind.dir()), id)
+    }
+
+    fn sealed_id(
+        encrypted: &Encrypted,
+        kind: ObjectKind,
+        id: &ObjectId,
+    ) -> Result<Option<ObjectId>, Error> {
+        let path = Self::index_path(encrypted, kind, id);
+        match fs::read_to_string(&path) {
+            Ok(text) => text
+                .parse()
+                .map(Some)
+                .map_err(|_| Error::Corrupt("invalid encrypted object index")),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Error::io(path, e)),
+        }
     }
 
     /// Returns the kind of a stored object, or `None` if it is not in the store.
     pub fn kind(&self, id: &ObjectId) -> Option<ObjectKind> {
-        [ObjectKind::Blob, ObjectKind::Tree]
-            .into_iter()
-            .find(|k| self.object_path(*k, id).is_file())
+        [ObjectKind::Blob, ObjectKind::Tree].into_iter().find(|k| {
+            self.object_path(*k, id).is_file()
+                || self
+                    .encrypted
+                    .as_ref()
+                    .is_some_and(|e| Self::index_path(e, *k, id).is_file())
+        })
     }
 
     /// Whether the object exists in the store.
@@ -106,6 +164,9 @@ impl Store {
 
     /// Streams a reader into the store as a blob.
     pub fn put_reader(&self, mut reader: impl Read) -> Result<ObjectId, Error> {
+        if let Some(encrypted) = self.encrypted.as_ref().filter(|e| e.write) {
+            return self.put_encrypted(encrypted, ObjectKind::Blob, reader);
+        }
         let tmp_dir = self.root.join("tmp");
         let mut tmp = NamedTempFile::new_in(&tmp_dir).map_err(|e| Error::io(&tmp_dir, e))?;
         let mut hasher = Hasher::new();
@@ -122,12 +183,15 @@ impl Store {
                 .map_err(|e| Error::io(tmp.path(), e))?;
         }
         let id = hasher.finish();
-        self.persist(tmp, ObjectKind::Blob, &id)?;
+        persist(tmp, &self.object_path(ObjectKind::Blob, &id))?;
         Ok(id)
     }
 
     fn put_tree(&self, tree: &Tree) -> Result<ObjectId, Error> {
         let encoded = tree.encode();
+        if let Some(encrypted) = self.encrypted.as_ref().filter(|e| e.write) {
+            return self.put_encrypted(encrypted, ObjectKind::Tree, encoded.as_slice());
+        }
         let id = ObjectId::of(&encoded);
         if self.object_path(ObjectKind::Tree, &id).is_file() {
             return Ok(id);
@@ -136,24 +200,46 @@ impl Store {
         let mut tmp = NamedTempFile::new_in(&tmp_dir).map_err(|e| Error::io(&tmp_dir, e))?;
         tmp.write_all(&encoded)
             .map_err(|e| Error::io(tmp.path(), e))?;
-        self.persist(tmp, ObjectKind::Tree, &id)?;
+        persist(tmp, &self.object_path(ObjectKind::Tree, &id))?;
         Ok(id)
     }
 
-    fn persist(&self, tmp: NamedTempFile, kind: ObjectKind, id: &ObjectId) -> Result<(), Error> {
-        let dest = self.object_path(kind, id);
-        if dest.is_file() {
-            return Ok(());
+    fn put_encrypted(
+        &self,
+        encrypted: &Encrypted,
+        kind: ObjectKind,
+        reader: impl Read,
+    ) -> Result<ObjectId, Error> {
+        let tmp_dir = self.root.join("tmp");
+        let mut tmp = NamedTempFile::new_in(&tmp_dir).map_err(|e| Error::io(&tmp_dir, e))?;
+        let (id, sealed) = encrypted
+            .key
+            .encrypt_object(reader, &mut tmp, kind.dir().as_bytes())
+            .map_err(|e| Error::io(tmp.path(), e))?;
+        let index = Self::index_path(encrypted, kind, &id);
+        if index.is_file() {
+            return Ok(id);
         }
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+        tmp.as_file()
+            .sync_all()
+            .map_err(|e| Error::io(tmp.path(), e))?;
+        persist(tmp, &self.sealed_path(kind, &sealed))?;
+        let index_dir = encrypted.index.join(kind.dir());
+        let mut reference =
+            NamedTempFile::new_in(&index_dir).map_err(|e| Error::io(&index_dir, e))?;
+        reference
+            .write_all(sealed.to_string().as_bytes())
+            .map_err(|e| Error::io(reference.path(), e))?;
+        reference
+            .as_file()
+            .sync_all()
+            .map_err(|e| Error::io(reference.path(), e))?;
+        persist(reference, &index)?;
+        if Self::sealed_id(encrypted, kind, &id)? != Some(sealed) {
+            let path = self.sealed_path(kind, &sealed);
+            fs::remove_file(&path).map_err(|e| Error::io(&path, e))?;
         }
-        match tmp.persist_noclobber(&dest) {
-            Ok(_) => Ok(()),
-            // Another writer stored the same object concurrently.
-            Err(_) if dest.is_file() => Ok(()),
-            Err(e) => Err(Error::io(&dest, e.error)),
-        }
+        Ok(id)
     }
 
     /// Stores a file or a directory (recursively) and returns the id of the blob or tree.
@@ -169,30 +255,68 @@ impl Store {
 
     /// Opens a blob for reading.
     pub fn open_blob(&self, id: &ObjectId) -> Result<File, Error> {
-        let path = self.object_path(ObjectKind::Blob, id);
+        self.open_object(ObjectKind::Blob, id)
+    }
+
+    /// Reads a whole blob into memory.
+    pub fn read_blob(&self, id: &ObjectId) -> Result<Vec<u8>, Error> {
+        self.read_object(ObjectKind::Blob, id)
+    }
+
+    /// Reads and decodes a tree.
+    pub fn read_tree(&self, id: &ObjectId) -> Result<Tree, Error> {
+        Tree::decode(&self.read_object(ObjectKind::Tree, id)?)
+    }
+
+    fn open_object(&self, kind: ObjectKind, id: &ObjectId) -> Result<File, Error> {
+        if let Some(encrypted) = &self.encrypted
+            && let Some(sealed) = Self::sealed_id(encrypted, kind, id)?
+        {
+            let dir = self.root.join("tmp");
+            let mut file = tempfile::tempfile_in(&dir).map_err(|e| Error::io(&dir, e))?;
+            self.decrypt(encrypted, kind, id, &sealed, &mut file)?;
+            file.rewind().map_err(|e| Error::io(&dir, e))?;
+            return Ok(file);
+        }
+        let path = self.object_path(kind, id);
         File::open(&path).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => Error::NotFound(*id),
             _ => Error::io(&path, e),
         })
     }
 
-    /// Reads a whole blob into memory.
-    pub fn read_blob(&self, id: &ObjectId) -> Result<Vec<u8>, Error> {
+    fn read_object(&self, kind: ObjectKind, id: &ObjectId) -> Result<Vec<u8>, Error> {
         let mut bytes = Vec::new();
-        let mut file = self.open_blob(id)?;
-        file.read_to_end(&mut bytes)
-            .map_err(|e| Error::io(self.object_path(ObjectKind::Blob, id), e))?;
+        if let Some(encrypted) = &self.encrypted
+            && let Some(sealed) = Self::sealed_id(encrypted, kind, id)?
+        {
+            self.decrypt(encrypted, kind, id, &sealed, &mut bytes)?;
+        } else {
+            self.open_object(kind, id)?
+                .read_to_end(&mut bytes)
+                .map_err(|e| Error::io(self.object_path(kind, id), e))?;
+        }
         Ok(bytes)
     }
 
-    /// Reads and decodes a tree.
-    pub fn read_tree(&self, id: &ObjectId) -> Result<Tree, Error> {
-        let path = self.object_path(ObjectKind::Tree, id);
-        let bytes = fs::read(&path).map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => Error::NotFound(*id),
-            _ => Error::io(&path, e),
-        })?;
-        Tree::decode(&bytes)
+    fn decrypt(
+        &self,
+        encrypted: &Encrypted,
+        kind: ObjectKind,
+        id: &ObjectId,
+        sealed: &ObjectId,
+        out: impl Write,
+    ) -> Result<(), Error> {
+        let path = self.sealed_path(kind, sealed);
+        let file = File::open(&path).map_err(|e| Error::io(&path, e))?;
+        let (actual, actual_sealed) = encrypted
+            .key
+            .decrypt_object(file, out, kind.dir().as_bytes())
+            .map_err(|e| Error::io(&path, e))?;
+        if actual != *id || actual_sealed != *sealed {
+            return Err(Error::Corrupt("encrypted object digest mismatch"));
+        }
+        Ok(())
     }
 
     /// Resolves a `/`-separated path inside a tree to the id of the entry it names.
@@ -255,24 +379,12 @@ impl Store {
 
     /// Iterates over all object ids of the given kind.
     pub fn list(&self, kind: ObjectKind) -> Result<Vec<ObjectId>, Error> {
-        let kind_dir = self.root.join(kind.dir());
-        let mut out = Vec::new();
-        for prefix in fs::read_dir(&kind_dir).map_err(|e| Error::io(&kind_dir, e))? {
-            let prefix = prefix.map_err(|e| Error::io(&kind_dir, e))?;
-            let prefix_name = prefix.file_name().to_string_lossy().into_owned();
-            if prefix_name.len() != 2 {
-                continue;
-            }
-            let dir = prefix.path();
-            for obj in fs::read_dir(&dir).map_err(|e| Error::io(&dir, e))? {
-                let obj = obj.map_err(|e| Error::io(&dir, e))?;
-                let name = obj.file_name().to_string_lossy().into_owned();
-                if let Ok(id) = format!("sha256:{prefix_name}{name}").parse() {
-                    out.push(id);
-                }
-            }
+        let mut out = list_at(&self.root.join(kind.dir()))?;
+        if let Some(encrypted) = &self.encrypted {
+            out.extend(list_at(&encrypted.index.join(kind.dir()))?);
         }
         out.sort();
+        out.dedup();
         Ok(out)
     }
 
@@ -282,21 +394,30 @@ impl Store {
         for kind in [ObjectKind::Blob, ObjectKind::Tree] {
             for id in self.list(kind)? {
                 report.checked += 1;
-                let path = self.object_path(kind, &id);
-                let ok = File::open(&path)
-                    .and_then(|mut f| {
-                        let mut h = Hasher::new();
-                        io::copy(&mut f, &mut h)?;
-                        Ok(h.finish() == id)
-                    })
-                    .unwrap_or(false);
-                let ok = ok && (kind == ObjectKind::Blob || self.read_tree(&id).is_ok());
+                let ok = self.verify_object(kind, &id).unwrap_or(false);
                 if !ok {
                     report.corrupt.push(id);
                 }
             }
         }
         Ok(report)
+    }
+
+    fn verify_object(&self, kind: ObjectKind, id: &ObjectId) -> Result<bool, Error> {
+        if kind == ObjectKind::Tree {
+            let bytes = self.read_object(kind, id)?;
+            return Ok(ObjectId::of(&bytes) == *id && Tree::decode(&bytes).is_ok());
+        }
+        if let Some(encrypted) = &self.encrypted
+            && let Some(sealed) = Self::sealed_id(encrypted, kind, id)?
+        {
+            self.decrypt(encrypted, kind, id, &sealed, io::sink())?;
+            return Ok(true);
+        }
+        let mut file = self.open_object(kind, id)?;
+        let mut hasher = Hasher::new();
+        io::copy(&mut file, &mut hasher).map_err(|e| Error::io(self.object_path(kind, id), e))?;
+        Ok(hasher.finish() == *id)
     }
 
     /// Returns every object reachable from `roots` (following trees). Missing roots are ignored.
@@ -330,9 +451,13 @@ impl Store {
                     continue;
                 }
                 let path = self.object_path(kind, &id);
-                let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                fs::remove_file(&path).map_err(|e| Error::io(&path, e))?;
-                report.bytes_freed += size;
+                report.bytes_freed += remove(&path)?;
+                if let Some(encrypted) = &self.encrypted
+                    && let Some(sealed) = Self::sealed_id(encrypted, kind, &id)?
+                {
+                    report.bytes_freed += remove(&self.sealed_path(kind, &sealed))?;
+                    remove(&Self::index_path(encrypted, kind, &id))?;
+                }
                 report.removed.push(id);
             }
         }
@@ -343,6 +468,52 @@ impl Store {
             }
         }
         Ok(report)
+    }
+}
+
+fn split_path(dir: &Path, id: &ObjectId) -> PathBuf {
+    let hex = id.to_hex();
+    dir.join(&hex[..2]).join(&hex[2..])
+}
+
+fn persist(tmp: NamedTempFile, dest: &Path) -> Result<(), Error> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+    }
+    match tmp.persist_noclobber(dest) {
+        Ok(_) => Ok(()),
+        // Another writer stored the same object concurrently.
+        Err(_) if dest.is_file() => Ok(()),
+        Err(e) => Err(Error::io(dest, e.error)),
+    }
+}
+
+fn list_at(dir: &Path) -> Result<Vec<ObjectId>, Error> {
+    let mut out = Vec::new();
+    for prefix in fs::read_dir(dir).map_err(|e| Error::io(dir, e))? {
+        let prefix = prefix.map_err(|e| Error::io(dir, e))?;
+        let prefix_name = prefix.file_name().to_string_lossy().into_owned();
+        if prefix_name.len() != 2 || !prefix.file_type().map_err(|e| Error::io(dir, e))?.is_dir() {
+            continue;
+        }
+        let path = prefix.path();
+        for obj in fs::read_dir(&path).map_err(|e| Error::io(&path, e))? {
+            let obj = obj.map_err(|e| Error::io(&path, e))?;
+            let name = obj.file_name().to_string_lossy().into_owned();
+            if let Ok(id) = format!("sha256:{prefix_name}{name}").parse() {
+                out.push(id);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn remove(path: &Path) -> Result<u64, Error> {
+    let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    match fs::remove_file(path) {
+        Ok(()) => Ok(size),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(Error::io(path, e)),
     }
 }
 

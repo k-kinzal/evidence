@@ -153,13 +153,17 @@ fn full_pipeline_update_pin_and_coverage() {
     // State lives in the evidence file (and the definition is untouched).
     let evid = fx.read("data/raw.json.evid");
     assert!(evid.starts_with("version = 2\nid = \"raw\""));
-    assert!(evid.contains("[state.content]") && evid.contains("snapshot = \"sha256:"));
+    assert!(evid.contains("[state.protected]"));
+    assert!(!evid.contains("snapshot = \"sha256:"));
     assert!(
         evid.contains("path = \"upstream/vulns.json\""),
         "locator: {evid}"
     );
-    // History is a plain file.
-    assert_eq!(fx.project().history("raw").unwrap().len(), 1);
+    let project = fx.project();
+    let raw = project.pair("raw").unwrap().file.state();
+    assert!(raw.content.is_some());
+    assert_eq!(raw.runs["fetch"].locator["path"], "upstream/vulns.json");
+    assert_eq!(project.history("raw").unwrap().len(), 1);
 
     // Nothing is due or stale now.
     assert!(fx.update(|_| {}).runs.is_empty());

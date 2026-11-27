@@ -20,12 +20,14 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod cipher;
 mod id;
 mod store;
 mod tree;
 
 use std::path::{Path, PathBuf};
 
+pub use cipher::EncryptionKey;
 pub use id::{ALGORITHM, Hasher, ObjectId, ParseObjectIdError};
 pub use store::{
     Filter, ObjectKind, PruneReport, Store, VerifyReport, hash_path, hash_path_filtered,

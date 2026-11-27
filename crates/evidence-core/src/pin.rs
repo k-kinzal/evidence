@@ -15,7 +15,6 @@ use crate::error::{Error, Result};
 use crate::fingerprint;
 use crate::format::{
     Claim, ContentMode, FINGERPRINT_VERSION, PinRecord, PinnedContent, PinnedReference, Reference,
-    document,
 };
 use crate::history::{self, Event, PinEvent};
 use crate::journal::{self, Transaction};
@@ -420,12 +419,16 @@ fn commit(
                 }
             )));
         }
-        let mut state = document::state_in(&p.text)
+        let mut state = crate::protection::writable_state(layout, &p.text)
             .map_err(|e| Error::Invalid(format!("{}: {e}", p.pair.evid_rel)))?;
         for (id, record) in &p.pins {
             state.pins.insert(id.clone(), record.clone());
         }
-        let text = document::replace_state(&p.text, &state)
+        let snapshot = p
+            .captured
+            .or_else(|| state.content.as_ref().map(|c| c.snapshot));
+        let replay = crate::replay::publish(layout, &layout.store()?, p.pair, &state, snapshot)?;
+        let text = crate::protection::replace_state(layout, &p.text, &state, replay)
             .map_err(|e| Error::Invalid(format!("{}: {e}", p.pair.evid_rel)))?;
         tx.stage_bytes(&p.pair.evid_path, text.as_bytes())?;
         let mut event = Event::new(now, "pin", "pinned");
@@ -529,10 +532,9 @@ mod tests {
         // Without interference, the pin is recorded.
         std::fs::write(root.join("d.md"), "# D\n\nD1\n").unwrap();
         plan_then(&layout, "d", || {}).unwrap();
-        assert!(
-            std::fs::read_to_string(&evid)
-                .unwrap()
-                .contains("[state.pins.c]")
-        );
+        let stored = std::fs::read_to_string(&evid).unwrap();
+        assert!(stored.contains("[state.protected]"));
+        let state = crate::protection::state_in(&layout, &stored).unwrap();
+        assert!(state.pins.contains_key("c"));
     }
 }

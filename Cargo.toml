@@ -72,6 +72,10 @@ figment = { version = "0.10", features = ["toml", "env"] }
 jiff = { version = "1", features = ["serde"] }
 ignore = "0.4"
 sha2 = "0.10"
+argon2 = { version = "0.5", default-features = false, features = ["zeroize"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "stream"] }
+getrandom = "0.4"
+zeroize = "1"
 hex = "0.4"
 tempfile = "3"
 tracing = "0.1"

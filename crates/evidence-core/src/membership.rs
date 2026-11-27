@@ -99,13 +99,13 @@ pub(crate) fn sync(
         let Ok(evid) = target else { continue };
         let result = match on_disk.iter().find(|f| f.key == entry.key) {
             Some(f) if f.evid_path == evid => {
-                refresh(ws, &evid, entry);
+                refresh(layout, ws, &evid, entry);
                 continue;
             }
             Some(f) => {
                 move_member(&f.evid_path, &evid, parent.evid_dir()).map(|()| MemberAction::Moved)
             }
-            None => create(&evid, parent_id, entry).map(|()| MemberAction::Added),
+            None => create(layout, &evid, parent_id, entry).map(|()| MemberAction::Added),
         };
         changes.push(match result {
             Ok(action) => change(&entry.key, action, &evid, None),
@@ -205,7 +205,7 @@ pub(crate) fn targets<'e>(
 }
 
 /// Writes the evidence file of a new member, with its entry recorded in `[state]`.
-fn create(evid: &Path, parent_id: &str, entry: &Entry) -> Result<(), String> {
+fn create(layout: &Layout, evid: &Path, parent_id: &str, entry: &Entry) -> Result<(), String> {
     if evid.exists() {
         return Err(format!("{} already exists", evid.display()));
     }
@@ -213,7 +213,12 @@ fn create(evid: &Path, parent_id: &str, entry: &Entry) -> Result<(), String> {
         member: Some(entry.state.clone()),
         ..State::default()
     };
-    let text = document::replace_state(&MemberFile::render(parent_id, &entry.key), &state)?;
+    let text = crate::protection::replace_state(
+        layout,
+        &MemberFile::render(parent_id, &entry.key),
+        &state,
+        None,
+    )?;
     if let Some(dir) = evid.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
@@ -221,7 +226,7 @@ fn create(evid: &Path, parent_id: &str, entry: &Entry) -> Result<(), String> {
 }
 
 /// A member without a command never runs, so its recorded entry is refreshed here.
-fn refresh(ws: &Workspace, evid: &Path, entry: &Entry) {
+fn refresh(layout: &Layout, ws: &Workspace, evid: &Path, entry: &Entry) {
     let Some(pair) = ws.pairs().iter().find(|p| p.evid_path == evid) else {
         return;
     };
@@ -231,12 +236,12 @@ fn refresh(ws: &Workspace, evid: &Path, entry: &Entry) {
     let Ok(text) = std::fs::read_to_string(evid) else {
         return;
     };
-    let Ok(mut state) = document::state_in(&text) else {
+    let Ok(mut state) = crate::protection::writable_state(layout, &text) else {
         return;
     };
     if state.member.as_ref() != Some(&entry.state) {
         state.member = Some(entry.state.clone());
-        let written = document::replace_state(&text, &state)
+        let written = crate::protection::replace_state(layout, &text, &state, None)
             .and_then(|t| document::atomic_write(evid, t.as_bytes()).map_err(|e| e.to_string()));
         if let Err(e) = written {
             tracing::warn!(evid = %evid.display(), error = %e, "recording member entry");

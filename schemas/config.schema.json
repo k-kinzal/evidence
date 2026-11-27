@@ -71,6 +71,10 @@
       "additionalProperties": false,
       "description": "`[store]`",
       "properties": {
+        "encryption": {
+          "description": "Encrypt newly written snapshots and managed metadata. Defaults to `true`.",
+          "type": "boolean"
+        },
         "path": {
           "description": "Object store directory. Relative paths are resolved against the project root.\nDefaults to `.evidence/objects`.",
           "type": "string"
