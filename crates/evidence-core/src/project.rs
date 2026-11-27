@@ -4,6 +4,7 @@
 //! Callers never deal with discovery, loading, target resolution, the clock, the project lock,
 //! the object store layout, or whether the SQLite index exists: those decisions live here.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use jiff::Timestamp;
@@ -418,6 +419,19 @@ impl Project {
     /// Reads a stored snapshot: `sha256:<hex>`, or `sha256:<hex>:<path>` for a file or
     /// directory inside a directory snapshot.
     pub fn object(&self, spec: &str) -> Result<Object> {
+        match self.open_object(spec)? {
+            Object::File(mut file) => {
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)
+                    .map_err(|e| Error::Invalid(format!("reading {spec}: {e}")))?;
+                Ok(Object::File(bytes))
+            }
+            Object::Directory(entries) => Ok(Object::Directory(entries)),
+        }
+    }
+
+    /// Opens a file snapshot for streaming, or lists one level of a directory snapshot.
+    pub fn open_object(&self, spec: &str) -> Result<Object<std::fs::File>> {
         let (id, path) = match spec.strip_prefix("sha256:").and_then(|r| r.split_once(':')) {
             Some((hex, path)) => (format!("sha256:{hex}"), path),
             None => (spec.to_owned(), ""),
@@ -427,7 +441,7 @@ impl Project {
             .map_err(|e| Error::Invalid(format!("`{spec}`: {e}")))?;
         let store = self.layout.store()?;
         Ok(match store.resolve(&id, path)? {
-            (cas_fs::ObjectKind::Blob, blob) => Object::File(store.read_blob(&blob)?),
+            (cas_fs::ObjectKind::Blob, blob) => Object::File(store.open_blob(&blob)?),
             (cas_fs::ObjectKind::Tree, tree) => Object::Directory(
                 store
                     .read_tree(&tree)?
@@ -468,6 +482,23 @@ impl Project {
         let replay = crate::replay::verify(&self.layout)?;
         report.checked += replay.checked;
         report.corrupt.extend(replay.corrupt);
+        let mut roots = Vec::new();
+        for pair in self.ws.pairs() {
+            let text = std::fs::read_to_string(&pair.evid_path)
+                .map_err(|e| Error::io(&pair.evid_path, e))?;
+            let shared = crate::protection::previous_shared(&text);
+            roots.extend(shared.plain);
+            if let Some(replay) = shared.replay
+                && !crate::replay::contains(&self.layout, &replay)
+            {
+                report.corrupt.push(replay.object);
+            }
+        }
+        let plain = crate::plain::verify(&self.layout, roots)?;
+        report.checked += plain.checked;
+        report.corrupt.extend(plain.corrupt);
+        report.corrupt.sort();
+        report.corrupt.dedup();
         Ok(StoreCheck {
             checked: report.checked,
             corrupt: report.corrupt.iter().map(ToString::to_string).collect(),
@@ -566,9 +597,9 @@ fn list_tree(
 
 /// A stored snapshot, as returned by [`Project::object`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Object {
+pub enum Object<B = Vec<u8>> {
     /// File content.
-    File(Vec<u8>),
+    File(B),
     /// Directory entries (one level).
     Directory(Vec<DirEntry>),
 }

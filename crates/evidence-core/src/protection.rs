@@ -81,18 +81,29 @@ pub(crate) fn project_key(meta: &Path, create: bool) -> Result<Option<Encryption
 
 /// Install local-only rules in a directory managed by Evidence, preserving an existing file.
 pub(crate) fn ignore_local(dir: &Path, patterns: &[u8]) -> Result<()> {
-    let path = dir.join(".gitignore");
-    let current = match fs::symlink_metadata(&path) {
-        Ok(info) if info.is_file() => fs::read(&path).map_err(|e| Error::io(&path, e))?,
+    ensure_rules(&dir.join(".gitignore"), patterns)
+}
+
+/// Installs Git rules without replacing project-specific ones already in the file.
+pub(crate) fn ensure_rules(path: &Path, patterns: &[u8]) -> Result<()> {
+    let current = match fs::symlink_metadata(path) {
+        Ok(info) if info.is_file() => fs::read(path).map_err(|e| Error::io(path, e))?,
         Ok(_) => {
-            return Err(Error::Invalid(
-                "the managed Git ignore file must be a regular file".into(),
-            ));
+            return Err(Error::Invalid(format!(
+                "{} must be a regular file",
+                path.display()
+            )));
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => return Err(Error::io(&path, e)),
+        Err(e) => return Err(Error::io(path, e)),
     };
-    if current.ends_with(patterns) {
+    let has_rules = current.ends_with(patterns)
+        || (current.contains(&b'\r')
+            && String::from_utf8_lossy(&current)
+                .replace("\r\n", "\n")
+                .as_bytes()
+                .ends_with(patterns));
+    if has_rules {
         return Ok(());
     }
     let mut rule = current;
@@ -100,7 +111,7 @@ pub(crate) fn ignore_local(dir: &Path, patterns: &[u8]) -> Result<()> {
         rule.push(b'\n');
     }
     rule.extend_from_slice(patterns);
-    crate::format::document::atomic_write(&path, &rule)?;
+    crate::format::document::atomic_write(path, &rule)?;
     Ok(())
 }
 
@@ -129,7 +140,7 @@ fn read_key(path: &Path) -> Result<Option<Zeroizing<[u8; 32]>>> {
     Ok(Some(key))
 }
 
-use crate::format::{self, ProtectedState, ReplayState, State, document};
+use crate::format::{self, PlainSnapshot, ProtectedState, ReplayState, State, document};
 use crate::layout::Layout;
 
 pub(crate) fn state_in(layout: &Layout, text: &str) -> Result<State, String> {
@@ -139,23 +150,47 @@ pub(crate) fn state_in(layout: &Layout, text: &str) -> Result<State, String> {
 
 pub(crate) fn writable_state(layout: &Layout, text: &str) -> Result<State, String> {
     let mut state = state_in(layout, text)?;
-    if state.protected.take().is_some_and(|p| p.replay.is_some()) {
-        return Err(
-            "the accepted snapshot is locked; retrieve its exact input versions first".into(),
-        );
+    if let Some(protected) = state.protected.take() {
+        if protected.plain.is_some() {
+            return Err(
+                "the accepted snapshot is locked; restore its plaintext chunks from Git first"
+                    .into(),
+            );
+        }
+        if protected.replay.is_some() {
+            return Err(
+                "the accepted snapshot is locked; retrieve its exact input versions first".into(),
+            );
+        }
     }
     Ok(state)
 }
 
-pub(crate) fn previous_replay(text: &str) -> Option<ReplayState> {
-    document::state_in(text).ok()?.protected?.replay
+pub(crate) fn previous_protected(text: &str) -> Option<ProtectedState> {
+    document::state_in(text).ok()?.protected
+}
+
+#[derive(Default)]
+pub(crate) struct SharedSnapshots {
+    pub(crate) replay: Option<ReplayState>,
+    pub(crate) plain: Option<PlainSnapshot>,
+}
+
+pub(crate) fn previous_shared(text: &str) -> SharedSnapshots {
+    previous_protected(text).map_or_else(SharedSnapshots::default, |p| SharedSnapshots {
+        replay: p.replay,
+        plain: p.plain,
+    })
 }
 
 fn decode_state(layout: &Layout, text: &str, mut state: State) -> Result<State, String> {
     let Some(protected) = state.protected.take() else {
         return Ok(state);
     };
-    if !state.is_empty() || protected.version != 1 {
+    if !state.is_empty()
+        || protected.version != 1
+        || (protected.replay.is_some() && protected.plain.is_some())
+    {
         return Err("invalid protected evidence state".into());
     }
     if let Some(key) = layout.key() {
@@ -175,9 +210,11 @@ pub(crate) fn replace_state(
     layout: &Layout,
     text: &str,
     state: &State,
-    replay: Option<ReplayState>,
+    shared: SharedSnapshots,
 ) -> Result<String, String> {
-    if !layout.config().config.store.encryption_enabled() || state.is_empty() {
+    if !layout.config().config.store.encryption_enabled()
+        || (state.is_empty() && shared.plain.is_none() && shared.replay.is_none())
+    {
         return document::replace_state(text, state);
     }
     let key = layout.key().ok_or("project key unavailable")?;
@@ -191,7 +228,8 @@ pub(crate) fn replace_state(
                 version: 1,
                 key: key.id(),
                 ciphertext: hex::encode(ciphertext),
-                replay,
+                replay: shared.replay,
+                plain: shared.plain,
             }),
             ..State::default()
         },

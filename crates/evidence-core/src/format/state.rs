@@ -24,6 +24,10 @@ pub struct State {
     /// Encrypted representation of this state when the project protects its metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protected: Option<ProtectedState>,
+    /// Only the publicly shared snapshot was recovered; local execution metadata is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<SnapshotIdSchema>")]
+    pub shared_baseline: Option<ObjectId>,
     /// Produced subjects: the version adopted by the last successful run that wrote it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentRecord>,
@@ -58,13 +62,34 @@ pub struct ProtectedState {
     /// Optional reproducible version recoverable from its existing inputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<ReplayState>,
+    /// The public manifest of a shareable plaintext snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plain: Option<PlainSnapshot>,
+}
+
+/// A shared plaintext snapshot, with the kind needed to reconstruct it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlainSnapshot {
+    /// Digest of the root chunk manifest.
+    #[schemars(with = "SnapshotIdSchema")]
+    pub object: ObjectId,
+    /// Digest of the public definition that adopted the snapshot.
+    #[schemars(with = "SnapshotIdSchema")]
+    pub definition: ObjectId,
+    /// The snapshot is a Merkle directory tree.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub directory: bool,
 }
 
 /// A protected revision and the source files needed to reopen it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReplayState {
-    /// SHA-256 of the encrypted replay payload.
+    /// Format version (absent for the original single-file format).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+    /// SHA-256 of the encrypted replay manifest, or payload in the original format.
     #[schemars(with = "SnapshotIdSchema")]
     pub object: ObjectId,
     /// Evidence IDs whose exact file contents unlock that revision.

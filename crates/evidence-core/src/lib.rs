@@ -46,6 +46,7 @@ mod membership;
 mod migrate;
 mod output;
 mod pin;
+mod plain;
 mod project;
 mod protection;
 mod remove;

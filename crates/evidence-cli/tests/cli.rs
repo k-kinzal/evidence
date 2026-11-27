@@ -879,28 +879,27 @@ fn normal_update_encrypts_objects_and_metadata_and_recovers_accepted_file() {
     for file in ["raw.txt.evid", "article.md.evid", "write.sh"] {
         std::fs::copy(p.dir.path().join(file), restored.dir.path().join(file)).unwrap();
     }
-    let objects = p.dir.path().join(".evidence/objects/replay/blob");
-    for prefix in std::fs::read_dir(objects).unwrap() {
-        let prefix = prefix.unwrap();
-        let out = restored
-            .dir
-            .path()
-            .join(".evidence/objects/replay/blob")
-            .join(prefix.file_name());
-        std::fs::create_dir_all(&out).unwrap();
-        for object in std::fs::read_dir(prefix.path()).unwrap() {
-            let object = object.unwrap();
-            let ciphertext = std::fs::read(object.path()).unwrap();
-            let id = ObjectId::of(&ciphertext).to_hex();
-            let mut actual_name = prefix.file_name().into_string().unwrap();
-            actual_name.push_str(&object.file_name().into_string().unwrap());
-            assert_eq!(actual_name, id);
-            assert!(
-                !ciphertext
-                    .windows(24)
-                    .any(|bytes| bytes == b"Approved private article")
-            );
-            std::fs::write(out.join(object.file_name()), ciphertext).unwrap();
+    for kind in ["manifest", "chunk"] {
+        let location = format!(".evidence/objects/replay/v2/{kind}");
+        let objects = p.dir.path().join(&location);
+        for prefix in std::fs::read_dir(objects).unwrap() {
+            let prefix = prefix.unwrap();
+            let out = restored.dir.path().join(&location).join(prefix.file_name());
+            std::fs::create_dir_all(&out).unwrap();
+            for object in std::fs::read_dir(prefix.path()).unwrap() {
+                let object = object.unwrap();
+                let ciphertext = std::fs::read(object.path()).unwrap();
+                let id = ObjectId::of(&ciphertext).to_hex();
+                let mut actual_name = prefix.file_name().into_string().unwrap();
+                actual_name.push_str(&object.file_name().into_string().unwrap());
+                assert_eq!(actual_name, id);
+                assert!(
+                    !ciphertext
+                        .windows(24)
+                        .any(|bytes| bytes == b"Approved private article")
+                );
+                std::fs::write(out.join(object.file_name()), ciphertext).unwrap();
+            }
         }
     }
     std::fs::write(&origin, b"wrong fixed version\n").unwrap();
@@ -951,4 +950,236 @@ fn normal_update_encrypts_objects_and_metadata_and_recovers_accepted_file() {
         .unwrap(),
         new,
     );
+}
+
+fn run_git(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn commit_and_clone(p: &Project, paths: &[&str]) -> Project {
+    let repo = p.dir.path();
+    run_git(repo, &["init", "-q"]);
+    let mut args = vec!["add", ".evidence"];
+    args.extend_from_slice(paths);
+    run_git(repo, &args);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "user.name=Evidence",
+            "-c",
+            "user.email=evidence@example.invalid",
+            "commit",
+            "-qm",
+            "Snapshots",
+        ],
+    );
+    let clone = Project {
+        dir: TempDir::new().unwrap(),
+        config: TempDir::new().unwrap(),
+    };
+    run_git(
+        repo,
+        &[
+            "clone",
+            "--no-local",
+            "-q",
+            repo.to_str().unwrap(),
+            clone.dir.path().to_str().unwrap(),
+        ],
+    );
+    clone
+}
+
+#[test]
+fn git_clone_restores_a_large_public_directory_without_regenerating_it() {
+    let p = Project::new();
+    p.write("produce.sh", "mkdir -p \"$1/sub\"\ndd if=/dev/zero of=\"$1/sub/data.bin\" bs=1048576 count=130\nprintf 'accepted\\n' >> \"$1/sub/data.bin\"\nprintf ran >> producer-ran\n");
+    p.write("local-marker", "private-run-metadata");
+    p.write(
+        "archive.evid",
+        r#"version = 2
+id = "archive"
+
+[storage]
+encryption = false
+
+[[productions]]
+name = "generate"
+writes = ["subject"]
+run = ["sh", "produce.sh", "{output}"]
+locator = { note = ["cat", "local-marker"] }
+"#,
+    );
+    p.cmd(&["update"]).assert().success();
+    let source = p.dir.path().join("archive/sub/data.bin");
+    let expected = cas_fs::hash_path(&source).unwrap();
+    let original_evid = std::fs::read_to_string(p.dir.path().join("archive.evid")).unwrap();
+    assert!(original_evid.contains("[state.protected.plain]"));
+    assert!(!original_evid.contains("private-run-metadata"));
+
+    let clone = commit_and_clone(&p, &["archive.evid", "produce.sh"]);
+    let tracked = run_git(clone.dir.path(), &["ls-tree", "-rl", "HEAD"]);
+    assert!(tracked.contains(".evidence/objects/plain/v2/chunk/"));
+    for forbidden in [
+        ".evidence/private/",
+        ".evidence/objects/blob/",
+        ".evidence/objects/tree/",
+        ".evidence/history/",
+        "archive/sub/data.bin",
+    ] {
+        assert!(!tracked.contains(forbidden), "{tracked}");
+    }
+    assert!(tracked.lines().all(|line| {
+        line.split_whitespace()
+            .nth(3)
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            <= cas_fs::CHUNK_SIZE
+    }));
+    clone.cmd(&["store", "verify"]).assert().success();
+    clone.cmd(&["update"]).assert().success();
+    clone.cmd(&["update"]).assert().success();
+    assert!(!clone.dir.path().join("producer-ran").exists());
+    let restored = clone.dir.path().join("archive/sub/data.bin");
+    assert_eq!(cas_fs::hash_path(&restored).unwrap(), expected);
+    assert_eq!(
+        std::fs::read_to_string(clone.dir.path().join("archive.evid")).unwrap(),
+        original_evid
+    );
+
+    std::fs::remove_file(&restored).unwrap();
+    let chunk = tracked
+        .lines()
+        .find_map(|line| {
+            let (_, path) = line.split_once('\t')?;
+            path.starts_with(".evidence/objects/plain/v2/chunk/")
+                .then_some(path)
+        })
+        .unwrap();
+    std::fs::remove_file(clone.dir.path().join(chunk)).unwrap();
+    clone.cmd(&["store", "verify"]).assert().code(1);
+    let fresh = Project {
+        dir: TempDir::new().unwrap(),
+        config: TempDir::new().unwrap(),
+    };
+    run_git(
+        p.dir.path(),
+        &[
+            "clone",
+            "--no-local",
+            "-q",
+            p.dir.path().to_str().unwrap(),
+            fresh.dir.path().to_str().unwrap(),
+        ],
+    );
+    std::fs::remove_file(fresh.dir.path().join(chunk)).unwrap();
+    fresh.cmd(&["update"]).assert().failure();
+    assert!(!fresh.dir.path().join("archive").exists());
+    assert!(!fresh.dir.path().join("producer-ran").exists());
+}
+
+#[test]
+fn large_replay_stream_survives_a_git_clone_without_sharing_its_key() {
+    use std::io::Write as _;
+    let p = Project::new();
+    let origin = TempDir::new().unwrap();
+    let source = origin.path().join("raw.bin");
+    let mut file = std::fs::File::create(&source).unwrap();
+    file.set_len(130 * 1024 * 1024).unwrap();
+    file.write_all(b"a private large-file marker").unwrap();
+    drop(file);
+    p.cmd(&[
+        "add",
+        "raw.bin",
+        "--kind",
+        "source",
+        "--",
+        "cp",
+        source.to_str().unwrap(),
+        "{output}",
+    ])
+    .assert()
+    .success();
+    p.write(
+        "derived.bin.evid",
+        r#"version = 2
+id = "derived"
+
+[[productions]]
+name = "make"
+writes = ["subject"]
+inputs = ["raw"]
+run = ["cp", "{input.raw}", "{output}"]
+"#,
+    );
+    p.cmd(&["update"]).assert().success();
+    let clone = commit_and_clone(&p, &["raw.bin.evid", "derived.bin.evid"]);
+    let tracked = run_git(clone.dir.path(), &["ls-tree", "-rl", "HEAD"]);
+    let chunks: Vec<_> = tracked
+        .lines()
+        .filter(|line| line.contains(".evidence/objects/replay/v2/chunk/"))
+        .collect();
+    assert!(chunks.len() > 32, "{tracked}");
+    assert!(chunks.iter().all(|line| {
+        line.split_whitespace()
+            .nth(3)
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            <= cas_fs::CHUNK_SIZE
+    }));
+    for forbidden in [
+        ".evidence/private/",
+        ".evidence/objects/sealed/",
+        ".evidence/objects/plain/",
+        ".evidence/history/",
+    ] {
+        assert!(!tracked.contains(forbidden), "{tracked}");
+    }
+    clone.cmd(&["update", "raw"]).assert().success();
+    assert_eq!(
+        cas_fs::hash_path(&clone.dir.path().join("derived.bin")).unwrap(),
+        cas_fs::hash_path(&source).unwrap()
+    );
+}
+
+#[test]
+fn git_does_not_convert_line_endings_in_published_chunks() {
+    let p = Project::new();
+    let body = "first line\r\nsecond line\n";
+    p.write("notes.txt", body);
+    p.write(
+        "notes.txt.evid",
+        "version = 2\nid = \"notes\"\n[storage]\nencryption = false\n",
+    );
+    p.cmd(&["update", "--pin", "notes"]).assert().success();
+    run_git(p.dir.path(), &["init", "-q"]);
+    run_git(p.dir.path(), &["config", "core.autocrlf", "true"]);
+    let clone = commit_and_clone(&p, &["notes.txt.evid"]);
+    run_git(clone.dir.path(), &["config", "core.autocrlf", "true"]);
+    run_git(clone.dir.path(), &["checkout-index", "--all", "--force"]);
+    clone.cmd(&["update"]).assert().success();
+    assert_eq!(
+        std::fs::read(clone.dir.path().join("notes.txt")).unwrap(),
+        body.as_bytes()
+    );
+    clone.cmd(&["store", "verify"]).assert().success();
 }

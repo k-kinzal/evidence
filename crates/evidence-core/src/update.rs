@@ -277,7 +277,28 @@ pub(crate) fn update(
     let mut restored = if opts.dry_run {
         HashSet::new()
     } else {
-        crate::replay::restore_available(layout, &mut ws, isolated, &mut tried_replay)?
+        let mut restored = HashSet::new();
+        loop {
+            let found = crate::plain::restore_available(layout, &mut ws, isolated)?;
+            let lists: Vec<_> = found
+                .iter()
+                .filter(|id| ws.get(id).is_some_and(|p| p.file.members.is_some()))
+                .cloned()
+                .collect();
+            restored.extend(found);
+            if lists.is_empty() {
+                break;
+            }
+            sync_members(layout, &ws, &lists, now, &mut report);
+            ws = Workspace::load(layout)?;
+        }
+        restored.extend(crate::replay::restore_available(
+            layout,
+            &mut ws,
+            isolated,
+            &mut tried_replay,
+        )?);
+        restored
     };
     let mut levels = ws.run_levels()?;
     let mut changed: HashSet<Node> = HashSet::new();
@@ -399,13 +420,23 @@ pub(crate) fn update(
         .iter()
         .filter(|p| selected.contains(&p.id) && locked(p))
     {
+        let shared_plain = pair
+            .file
+            .state
+            .as_ref()
+            .and_then(|s| s.protected.as_ref())
+            .is_some_and(|p| p.plain.is_some());
         report.skipped.push(Skipped {
             id: pair.id.clone(),
             code: "locked-snapshot".into(),
-            message: format!(
-                "{} needs the exact input versions for its accepted snapshot",
-                pair.id
-            ),
+            message: if shared_plain {
+                format!("{} needs its accepted plaintext snapshot from Git", pair.id)
+            } else {
+                format!(
+                    "{} needs the exact input versions for its accepted snapshot",
+                    pair.id
+                )
+            },
         });
     }
     Ok(report)
@@ -416,7 +447,7 @@ fn locked(pair: &Pair) -> bool {
         .state
         .as_ref()
         .and_then(|s| s.protected.as_ref())
-        .is_some_and(|p| p.replay.is_some())
+        .is_some_and(|p| p.replay.is_some() || p.plain.is_some())
 }
 
 /// Brings the members of `parents` in step with their lists. Returns whether any evidence
@@ -1254,6 +1285,7 @@ fn adopt_staged(
             production: Some(production.name.clone()),
             run: Some(staged.run.clone()),
         });
+        state.shared_baseline = None;
         report.content = Some(ContentChange {
             changed: content_changed,
             snapshot: snapshot.to_string(),
@@ -1262,6 +1294,7 @@ fn adopt_staged(
     }
     if let Some(version) = &staged.pinned_editable {
         resolver.keep(version).map_err(|e| e.to_string())?;
+        state.shared_baseline = None;
     }
     if let Some(claims) = &staged.claims {
         let old = state.generated.remove(&production.name).unwrap_or_default();
@@ -1333,7 +1366,13 @@ fn adopt_staged(
         });
     let replay = crate::replay::publish(layout, &resolver, pair, &state, version)
         .map_err(|e| e.to_string())?;
-    let new_text = crate::protection::replace_state(layout, &text, &state, replay)
+    let plain = if staged.output.is_some() || staged.pinned_editable.is_some() {
+        crate::plain::publish(layout, ws.store(), pair, version).map_err(|e| e.to_string())?
+    } else {
+        crate::protection::previous_shared(&text).plain
+    };
+    let shared = crate::protection::SharedSnapshots { replay, plain };
+    let new_text = crate::protection::replace_state(layout, &text, &state, shared)
         .map_err(|e| format!("{}: {e}", pair.evid_rel))?;
     tx.stage_bytes(&pair.evid_path, new_text.as_bytes())
         .map_err(|e| e.to_string())?;
@@ -1369,7 +1408,7 @@ fn record_failure(
         layout,
         &text,
         &state,
-        crate::protection::previous_replay(&text),
+        crate::protection::previous_shared(&text),
     )
     .map_err(Error::Invalid)?;
     document::atomic_write(&pair.evid_path, new_text.as_bytes())?;

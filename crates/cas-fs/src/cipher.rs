@@ -78,7 +78,8 @@ impl EncryptionKey {
             .map_err(|_| damaged())
     }
 
-    pub(crate) fn encrypt_object(
+    /// Encrypts a stream with authenticated frames and returns the plaintext and ciphertext digests.
+    pub fn encrypt_object(
         &self,
         mut reader: impl Read,
         mut writer: impl Write,
@@ -113,7 +114,8 @@ impl EncryptionKey {
         }
     }
 
-    pub(crate) fn decrypt_object(
+    /// Authenticates and decrypts a stream. Hold the output privately until this returns successfully.
+    pub fn decrypt_object(
         &self,
         mut reader: impl Read,
         mut writer: impl Write,

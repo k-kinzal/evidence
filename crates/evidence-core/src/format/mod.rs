@@ -34,6 +34,6 @@ pub use schema::{config_schema, evid_schema};
 pub use span_select::{LineRange, Selector};
 pub use state::{
     ContentRecord, FINGERPRINT_VERSION, FailedAttempt, InputVersion, MemberState, PinRecord,
-    PinnedContent, PinnedReference, ProtectedState, ReplayState, RunRecord, RunStatus,
-    SnapshotStorage, State,
+    PinnedContent, PinnedReference, PlainSnapshot, ProtectedState, ReplayState, RunRecord,
+    RunStatus, SnapshotStorage, State,
 };

@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod chunks;
 mod cipher;
 mod id;
 mod store;
@@ -27,6 +28,7 @@ mod tree;
 
 use std::path::{Path, PathBuf};
 
+pub use chunks::{CHUNK_SIZE, ChunkReader, ChunkStore, ChunkWriter};
 pub use cipher::EncryptionKey;
 pub use id::{ALGORITHM, Hasher, ObjectId, ParseObjectIdError};
 pub use store::{

@@ -224,7 +224,8 @@ impl Store {
         Ok(id)
     }
 
-    fn put_tree(&self, tree: &Tree) -> Result<ObjectId, Error> {
+    /// Stores a canonical directory listing.
+    pub fn put_tree(&self, tree: &Tree) -> Result<ObjectId, Error> {
         let encoded = tree.encode();
         if let Some(encrypted) = self.write_encrypted()? {
             return self.put_encrypted(encrypted, ObjectKind::Tree, encoded.as_slice());
@@ -550,12 +551,12 @@ impl Store {
     }
 }
 
-fn split_path(dir: &Path, id: &ObjectId) -> PathBuf {
+pub(crate) fn split_path(dir: &Path, id: &ObjectId) -> PathBuf {
     let hex = id.to_hex();
     dir.join(&hex[..2]).join(&hex[2..])
 }
 
-fn persist(tmp: NamedTempFile, dest: &Path) -> Result<(), Error> {
+pub(crate) fn persist(tmp: NamedTempFile, dest: &Path) -> Result<(), Error> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
     }
@@ -567,7 +568,7 @@ fn persist(tmp: NamedTempFile, dest: &Path) -> Result<(), Error> {
     }
 }
 
-fn list_at(dir: &Path) -> Result<Vec<ObjectId>, Error> {
+pub(crate) fn list_at(dir: &Path) -> Result<Vec<ObjectId>, Error> {
     let mut out = Vec::new();
     for prefix in fs::read_dir(dir).map_err(|e| Error::io(dir, e))? {
         let prefix = prefix.map_err(|e| Error::io(dir, e))?;

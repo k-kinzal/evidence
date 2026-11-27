@@ -342,7 +342,7 @@ pub(crate) fn capture(
 ) -> Result<Version, ResolveError> {
     let meta =
         std::fs::metadata(path).map_err(|_| ResolveError::SubjectMissing(label.to_owned()))?;
-    if meta.is_file() {
+    if meta.is_file() && meta.len() <= cas_fs::CHUNK_SIZE as u64 {
         let bytes = std::fs::read(path).map_err(|_| ResolveError::Unreadable(label.to_owned()))?;
         return Ok(Version::Captured {
             snapshot: ObjectId::of(&bytes),

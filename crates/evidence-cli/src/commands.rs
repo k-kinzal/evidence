@@ -1339,10 +1339,9 @@ fn run_search(ctx: &Ctx, query: &str, limit: usize, no_index: bool) -> Result<i3
 }
 
 fn cat(ctx: &Ctx, object: &str) -> Result<i32> {
-    match ctx.project()?.object(object)? {
-        Object::File(bytes) => {
-            use std::io::Write as _;
-            std::io::stdout().lock().write_all(&bytes)?;
+    match ctx.project()?.open_object(object)? {
+        Object::File(mut reader) => {
+            std::io::copy(&mut reader, &mut std::io::stdout().lock())?;
         }
         Object::Directory(entries) => {
             if ctx.out.json {

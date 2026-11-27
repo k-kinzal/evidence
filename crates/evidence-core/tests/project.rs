@@ -245,9 +245,13 @@ stdout = true
     for file in ["public.txt.evid", "public-result.txt.evid"] {
         checkout.write(file, &fx.read(file));
     }
-    let report = checkout.update(|_| {});
-    assert!(!report.has_failures(), "{report:?}");
-    assert_eq!(checkout.read("public-result.txt"), "public-result body");
+    // A checkout needs the published chunks as well as the definition of an accepted revision.
+    let error = checkout
+        .project()
+        .update(&UpdateOptions::default())
+        .unwrap_err();
+    assert!(error.to_string().contains("not found"), "{error}");
+    assert!(!checkout.root.join("public-result.txt").exists());
 }
 
 #[test]

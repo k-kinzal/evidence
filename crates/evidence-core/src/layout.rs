@@ -25,19 +25,11 @@ const CONFIG_TEMPLATE: &str = r#"# Evidence project configuration (shared with t
 "#;
 
 const GITIGNORE: &str = "# Local, regenerable, or per-user files.
-index.db
-index.db-*
-tmp/
-cache/
-private/
-journal/
-backup/
-objects/tmp/
-lock
-config.local.toml
 # Uncomment to keep the entire local store, including replay objects, out of Git:
 # objects/
 ";
+const LOCAL_IGNORE: &[u8] = b"/index.db\n/index.db-*\n/tmp/\n/cache/\n/private/\n/journal/\n/backup/\n/objects/tmp/\n/objects/blob/\n/objects/tree/\n/objects/sealed/\n/objects/replay/blob/\n/history/\n/lock\n/config.local.toml\n";
+const CHUNK_ATTRIBUTES: &[u8] = b"objects/plain/v2/** binary -filter -ident\nobjects/replay/v2/** binary -filter -ident -delta\n";
 
 /// Configuration layers, lowest precedence first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,6 +274,8 @@ impl Layout {
         if !root.join(DIR).is_dir() {
             return Err(Error::NoProject(root));
         }
+        crate::protection::ignore_local(&root.join(DIR), LOCAL_IGNORE)?;
+        crate::protection::ensure_rules(&root.join(DIR).join(".gitattributes"), CHUNK_ATTRIBUTES)?;
         let config = LoadedConfig::load(Some(&root))?;
         let key = crate::protection::project_key(
             &root.join(DIR),
@@ -333,15 +327,13 @@ impl Layout {
     pub(crate) fn store(&self) -> Result<cas_fs::Store> {
         let root = self.store_dir();
         let store = cas_fs::Store::open(&root)?;
+        crate::protection::ignore_local(&root, b"/blob/\n/tree/\n/sealed/\n/tmp/\n")?;
         if let Some(key) = &self.key {
             let canonical = fs::canonicalize(&root).map_err(|e| Error::io(&root, e))?;
             let store_identity = canonical.strip_prefix(&self.root).unwrap_or(&canonical);
             let namespace =
                 cas_fs::ObjectId::of(store_identity.as_os_str().as_encoded_bytes()).to_hex();
             let enabled = self.config.config.store.encryption_enabled();
-            if enabled {
-                crate::protection::ignore_local(&root, b"/blob/\n/tree/\n/sealed/\n/tmp/\n")?;
-            }
             return Ok(store.with_encryption(
                 key.clone(),
                 self.meta_dir().join("private/lookup").join(namespace),

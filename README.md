@@ -94,16 +94,29 @@ of its dependencies.
 encryption = false
 ```
 
-With the default project configuration, `.evidence/objects/blob/` and `tree/` hold local
-plaintext objects and `.evidence/objects/sealed/` holds local ciphertext. These directories
-are Git-ignored. Tool-managed `.evid` state and new history records remain encrypted for
-plaintext snapshots as well. The random key and plaintext-digest index live in the
-Git-ignored `.evidence/private/` directory. Keep it with the worktree to read local history
-and encrypted snapshots. Older snapshots and state remain readable, and policy changes
-apply to newly stored versions. Review Git history separately if plaintext was committed.
+With encryption enabled, `evidence update` and `evidence update --pin` make approved plaintext
+snapshots available in `.evidence/objects/plain/v2/`. Commit `.evidence` and the corresponding
+`.evid` files. An ordinary `evidence update` in a fresh checkout restores the accepted bytes,
+including directory snapshots. The receiving checkout can reuse the accepted snapshot with
+the same definition, while private execution metadata stays encrypted in the original state.
+
+Shared objects use manifests and chunks of at most 4 MiB each. The logical snapshot ID
+still hashes the original file or directory. `evidence store verify` checks shared objects
+and reports broken references. A failed restoration leaves the working file untouched.
+Commit `.evidence/.gitattributes` with these objects so Git preserves their exact bytes.
+The per-file Git limit is separate from the push and repository size limits.
+
+The local object store (`blob/`, `tree/`, and `sealed/`), history, caches, temporary files, and
+`.evidence/private/` are Git-ignored. Keep the private directory with the worktree to access
+its history and encrypted objects. Older local objects and replay files remain readable.
+To publish an existing accepted version in the new format, run `evidence update --pin <id>`
+with the original subject and required objects available. On existing projects, review the
+staged paths: Git ignore rules apply to untracked files. Existing Git commits retain their
+objects.
 
 To opt the project out of encryption for new writes, including state and history, set this
-in `.evidence/config.toml` or your local configuration layer. This overrides per-file policy.
+in `.evidence/config.toml` or your local configuration layer. This overrides per-file policy
+and keeps new object snapshots in the local store.
 
 ```toml
 [store]
@@ -111,9 +124,10 @@ encryption = false
 ```
 
 For an encrypted accepted file with reproducible dependencies, an update can also store a
-replay object under `.evidence/objects/replay/`. To create one, Evidence requires at least one
-recorded encrypted input or reference whose bytes have no local plaintext copy. Its name is
-the digest of the ciphertext. The `.evid` state identifies the required inputs. In another
+replay manifest and encrypted chunks under `.evidence/objects/replay/v2/`. To create one,
+Evidence requires at least one recorded encrypted input or reference whose bytes have no
+local plaintext copy. Public digests identify the manifest and ciphertext chunks. The
+`.evid` state identifies the required inputs. In another
 checkout, the usual `evidence update` can reacquire those inputs via their configured
 productions and recover the accepted file from the exact input bytes. For a time-series
 query, keep the source version or as-of time, range, and output settings in the acquisition
@@ -122,13 +136,11 @@ update reports which artifact needs its inputs.
 
 Replay objects use salted Argon2id key derivation and authenticated encryption. Use them with
 inputs that are difficult to guess. A reader who retains the exact inputs can reopen the
-version later. Portable replay supports regular-file snapshots with one recorded version per
-input ID and a combined body limit of 128 MiB. The local store also encrypts directory
-snapshots and larger inputs.
+version later. Portable replay streams regular-file snapshots and inputs, using one recorded
+version per input ID. Encrypted directory snapshots are available through the local store.
 
-Materialized working files and hand-written definitions are ordinary files. Keep private
-working files, definitions, and any older plaintext already in Git out of the shared history.
-Share the definitions you have approved for publication and the replay objects they reference.
+Materialized working files and hand-written definitions are ordinary files. Add approved
+definitions and shared objects to Git, and keep private working files and definitions local.
 
 ## Wiki
 

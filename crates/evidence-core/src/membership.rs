@@ -217,7 +217,7 @@ fn create(layout: &Layout, evid: &Path, parent_id: &str, entry: &Entry) -> Resul
         layout,
         &MemberFile::render(parent_id, &entry.key),
         &state,
-        None,
+        crate::protection::SharedSnapshots::default(),
     )?;
     if let Some(dir) = evid.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -241,8 +241,13 @@ fn refresh(layout: &Layout, ws: &Workspace, evid: &Path, entry: &Entry) {
     };
     if state.member.as_ref() != Some(&entry.state) {
         state.member = Some(entry.state.clone());
-        let written = crate::protection::replace_state(layout, &text, &state, None)
-            .and_then(|t| document::atomic_write(evid, t.as_bytes()).map_err(|e| e.to_string()));
+        let written = crate::protection::replace_state(
+            layout,
+            &text,
+            &state,
+            crate::protection::previous_shared(&text),
+        )
+        .and_then(|t| document::atomic_write(evid, t.as_bytes()).map_err(|e| e.to_string()));
         if let Err(e) = written {
             tracing::warn!(evid = %evid.display(), error = %e, "recording member entry");
         }

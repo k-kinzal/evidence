@@ -594,6 +594,29 @@
       ],
       "type": "object"
     },
+    "PlainSnapshot": {
+      "additionalProperties": false,
+      "description": "A shared plaintext snapshot, with the kind needed to reconstruct it.",
+      "properties": {
+        "definition": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "Digest of the public definition that adopted the snapshot."
+        },
+        "directory": {
+          "description": "The snapshot is a Merkle directory tree.",
+          "type": "boolean"
+        },
+        "object": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "Digest of the root chunk manifest."
+        }
+      },
+      "required": [
+        "object",
+        "definition"
+      ],
+      "type": "object"
+    },
     "Primary": {
       "additionalProperties": false,
       "description": "A range declared as primary information (`[[primary]]`).",
@@ -703,6 +726,10 @@
           "$ref": "#/$defs/SnapshotIdSchema",
           "description": "Identifier of the random local key that sealed this record."
         },
+        "plain": {
+          "$ref": "#/$defs/PlainSnapshot",
+          "description": "The public manifest of a shareable plaintext snapshot."
+        },
         "replay": {
           "$ref": "#/$defs/ReplayState",
           "description": "Optional reproducible version recoverable from its existing inputs."
@@ -782,7 +809,13 @@
         },
         "object": {
           "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "SHA-256 of the encrypted replay payload."
+          "description": "SHA-256 of the encrypted replay manifest, or payload in the original format."
+        },
+        "version": {
+          "description": "Format version (absent for the original single-file format).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "required": [
@@ -1054,6 +1087,10 @@
           },
           "description": "The last successful run of each production, by production name.",
           "type": "object"
+        },
+        "shared_baseline": {
+          "$ref": "#/$defs/SnapshotIdSchema",
+          "description": "Only the publicly shared snapshot was recovered; local execution metadata is unavailable."
         }
       },
       "type": "object"

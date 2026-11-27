@@ -591,6 +591,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "assert_fs",
+ "cas-fs",
  "clap",
  "clap_complete",
  "evidence-core",

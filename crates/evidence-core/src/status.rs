@@ -438,6 +438,16 @@ pub(crate) fn production_reasons(
         ));
     }
     let Some(record) = record else {
+        if let Some(definition) = state.shared_baseline {
+            if crate::plain::definition_id(pair) != Some(definition) {
+                out.push(Reason::new(
+                    Health::Stale,
+                    "production-changed",
+                    "the public definition changed since the restored snapshot was accepted",
+                ));
+            }
+            return out;
+        }
         let missing = production.writes_subject() && !pair.subject_path.exists();
         out.push(Reason::new(
             if missing {

@@ -203,6 +203,7 @@ struct Planned<'a> {
     /// The captured subject of an editable pair.
     captured: Option<cas_fs::ObjectId>,
     subject: Version,
+    publish_plain: bool,
     pins: BTreeMap<String, PinRecord>,
 }
 
@@ -274,7 +275,14 @@ pub(crate) fn pin(
         };
         let text =
             std::fs::read_to_string(&pair.evid_path).map_err(|e| Error::io(&pair.evid_path, e))?;
-        let subject = match subject_for_pin(&resolver, pair) {
+        let claims: Vec<_> = pair
+            .file
+            .all_claims()
+            .into_iter()
+            .map(|(claim, _)| claim)
+            .filter(|claim| only.as_ref().is_none_or(|ids| ids.contains(&claim.id)))
+            .collect();
+        let subject = match subject_for_pin(&resolver, pair, !claims.is_empty()) {
             Ok(s) => s,
             Err(why) => {
                 out.failed.push(PinFailure {
@@ -286,13 +294,6 @@ pub(crate) fn pin(
             }
         };
         let (mut version, body) = subject;
-        let claims: Vec<_> = pair
-            .file
-            .all_claims()
-            .into_iter()
-            .map(|(claim, _)| claim)
-            .filter(|claim| only.as_ref().is_none_or(|ids| ids.contains(&claim.id)))
-            .collect();
         let mut references = BTreeMap::new();
         for reference in claims.iter().flat_map(|claim| &claim.evidence) {
             if reference.id() != pair.id || reference.is_fixed() {
@@ -310,11 +311,12 @@ pub(crate) fn pin(
         for ((id, _), version) in &references {
             deps.add(id, version.as_ref().ok().and_then(Version::storage));
         }
-        match deps.decide(&resolver, pair) {
+        let publish_plain = match deps.decide(&resolver, pair) {
             Ok(class) => {
                 if let Version::Captured { storage, .. } = &mut version {
                     *storage = class;
                 }
+                class == SnapshotStorage::Plain
             }
             Err(e) => {
                 out.failed.push(PinFailure {
@@ -324,7 +326,7 @@ pub(crate) fn pin(
                 report.pairs.push(out);
                 continue;
             }
-        }
+        };
         let captured = match &version {
             Version::Captured { snapshot, .. } => Some(*snapshot),
             Version::Stored(..) => None,
@@ -388,6 +390,7 @@ pub(crate) fn pin(
             text,
             captured,
             subject: version,
+            publish_plain,
             pins,
         });
     }
@@ -404,6 +407,7 @@ pub(crate) fn pin(
 fn subject_for_pin(
     resolver: &Resolver<'_>,
     pair: &Pair,
+    read_text: bool,
 ) -> std::result::Result<(Version, String), String> {
     if pair.file.content_mode() == ContentMode::Produced {
         let adopted = pair
@@ -441,7 +445,11 @@ fn subject_for_pin(
         ),
     }
     .map_err(|e| e.to_string())?;
-    let text = resolver.text(&version, None).map_err(|e| e.to_string())?;
+    let text = if read_text {
+        resolver.text(&version, None).map_err(|e| e.to_string())?
+    } else {
+        String::new()
+    };
     Ok((version, text))
 }
 
@@ -473,7 +481,14 @@ fn commit(
             )));
         }
         resolver.keep(&p.subject)?;
-        if p.pins.is_empty() {
+        let version = Some((p.subject.snapshot(), p.subject.storage()));
+        let previous = crate::protection::previous_shared(&p.text);
+        let plain = if p.publish_plain {
+            crate::plain::publish(layout, resolver.store, p.pair, version)?
+        } else {
+            None
+        };
+        if p.pins.is_empty() && plain.is_none() && previous.replay.is_none() {
             continue;
         }
         let mut state = crate::protection::writable_state(layout, &p.text)
@@ -481,11 +496,22 @@ fn commit(
         for (id, record) in &p.pins {
             state.pins.insert(id.clone(), record.clone());
         }
-        let version = Some((p.subject.snapshot(), p.subject.storage()));
-        let replay = crate::replay::publish(layout, resolver, p.pair, &state, version)?;
-        let text = crate::protection::replace_state(layout, &p.text, &state, replay)
+        if p.captured.is_some() {
+            state.shared_baseline = None;
+        }
+        let replay = if plain.is_some() {
+            None
+        } else {
+            crate::replay::publish(layout, resolver, p.pair, &state, version)?
+                .or_else(|| p.pins.is_empty().then_some(previous.replay).flatten())
+        };
+        let shared = crate::protection::SharedSnapshots { replay, plain };
+        let text = crate::protection::replace_state(layout, &p.text, &state, shared)
             .map_err(|e| Error::Invalid(format!("{}: {e}", p.pair.evid_rel)))?;
         tx.stage_bytes(&p.pair.evid_path, text.as_bytes())?;
+        if p.pins.is_empty() {
+            continue;
+        }
         let mut event = Event::new(now, "pin", "pinned");
         event.by = by.map(str::to_owned);
         event.claims = p.pins.keys().cloned().collect();
@@ -510,7 +536,7 @@ pub(crate) fn plan_then<F: FnOnce()>(layout: &Layout, target: &str, between: F) 
         .ok_or_else(|| Error::NotFound(target.into()))?;
     let text =
         std::fs::read_to_string(&pair.evid_path).map_err(|e| Error::io(&pair.evid_path, e))?;
-    let (version, body) = subject_for_pin(&resolver, pair).map_err(Error::Invalid)?;
+    let (version, body) = subject_for_pin(&resolver, pair, true).map_err(Error::Invalid)?;
     let captured = match &version {
         Version::Captured { snapshot, .. } => Some(*snapshot),
         Version::Stored(..) => None,
@@ -543,6 +569,7 @@ pub(crate) fn plan_then<F: FnOnce()>(layout: &Layout, target: &str, between: F) 
             text,
             captured,
             subject: stored,
+            publish_plain: false,
             pins,
         }],
         None,

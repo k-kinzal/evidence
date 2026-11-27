@@ -266,8 +266,13 @@ pub(crate) fn migrate(
                 std::fs::write(&backup, &original).map_err(|e| Error::io(&backup, e))?;
             }
             let state = document::state_in(&r.text).map_err(Error::Invalid)?;
-            let text = crate::protection::replace_state(layout, &r.text, &state, None)
-                .map_err(Error::Invalid)?;
+            let text = crate::protection::replace_state(
+                layout,
+                &r.text,
+                &state,
+                crate::protection::SharedSnapshots::default(),
+            )
+            .map_err(Error::Invalid)?;
             document::atomic_write(&r.path, text.as_bytes())?;
             if let Some(id) = &r.id {
                 let mut event = Event::new(now, "migrate", "migrated");
