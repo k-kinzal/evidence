@@ -140,17 +140,18 @@ fn read_key(path: &Path) -> Result<Option<Zeroizing<[u8; 32]>>> {
     Ok(Some(key))
 }
 
-use crate::format::{self, PlainSnapshot, ProtectedState, ReplayState, State, document};
+use crate::format::{self, PlainSnapshot, ReplayState, State, document};
 use crate::layout::Layout;
+use crate::lockfile::LockFile;
 
 pub(crate) fn state_in(layout: &Layout, text: &str) -> Result<State, String> {
-    let state = document::state_in(text)?;
-    decode_state(layout, text, state)
+    LockFile::load(layout)
+        .map_err(|e| e.to_string())?
+        .state(layout, text)
 }
 
-pub(crate) fn writable_state(layout: &Layout, text: &str) -> Result<State, String> {
-    let mut state = state_in(layout, text)?;
-    if let Some(protected) = state.protected.take() {
+pub(crate) fn writable(mut state: State) -> Result<State, String> {
+    if let Some(protected) = state.pending.take() {
         if protected.plain.is_some() {
             return Err(
                 "the accepted snapshot is locked; restore its plaintext chunks from Git first"
@@ -166,81 +167,10 @@ pub(crate) fn writable_state(layout: &Layout, text: &str) -> Result<State, Strin
     Ok(state)
 }
 
-pub(crate) fn previous_protected(text: &str) -> Option<ProtectedState> {
-    document::state_in(text).ok()?.protected
-}
-
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct SharedSnapshots {
     pub(crate) replay: Option<ReplayState>,
     pub(crate) plain: Option<PlainSnapshot>,
-}
-
-pub(crate) fn previous_shared(text: &str) -> SharedSnapshots {
-    previous_protected(text).map_or_else(SharedSnapshots::default, |p| SharedSnapshots {
-        replay: p.replay,
-        plain: p.plain,
-    })
-}
-
-fn decode_state(layout: &Layout, text: &str, mut state: State) -> Result<State, String> {
-    let Some(protected) = state.protected.take() else {
-        return Ok(state);
-    };
-    if !state.is_empty()
-        || protected.version != 1
-        || (protected.replay.is_some() && protected.plain.is_some())
-    {
-        return Err("invalid protected evidence state".into());
-    }
-    if let Some(key) = layout.key() {
-        let context = state_context(text)?;
-        if key.id() == protected.key {
-            return open_state(key, &context, &protected.ciphertext);
-        }
-        if let Some(state) = crate::replay::cached_state(layout, &context, &protected)? {
-            return Ok(state);
-        }
-    }
-    state.protected = Some(protected);
-    Ok(state)
-}
-
-pub(crate) fn replace_state(
-    layout: &Layout,
-    text: &str,
-    state: &State,
-    shared: SharedSnapshots,
-) -> Result<String, String> {
-    if !layout.config().config.store.encryption_enabled()
-        || (state.is_empty() && shared.plain.is_none() && shared.replay.is_none())
-    {
-        return document::replace_state(text, state);
-    }
-    let key = layout.key().ok_or("project key unavailable")?;
-    let context = state_context(text)?;
-    let state = Zeroizing::new(serde_json::to_vec(state).map_err(|e| e.to_string())?);
-    let ciphertext = key.seal(&context, &state).map_err(|e| e.to_string())?;
-    document::replace_state(
-        text,
-        &State {
-            protected: Some(ProtectedState {
-                version: 1,
-                key: key.id(),
-                ciphertext: hex::encode(ciphertext),
-                replay: shared.replay,
-                plain: shared.plain,
-            }),
-            ..State::default()
-        },
-    )
-}
-
-pub(crate) fn state_context(text: &str) -> Result<Vec<u8>, String> {
-    let definition = document::definition_in(text).ok_or("invalid evidence identity")?;
-    let id = |key: &str| definition.get(key).and_then(toml::Value::as_str);
-    serde_json::to_vec(&("evidence-state-v1", id("id"), id("member_of"), id("member")))
-        .map_err(|e| e.to_string())
 }
 
 pub(crate) fn open_state(
@@ -251,44 +181,33 @@ pub(crate) fn open_state(
     let ciphertext =
         hex::decode(ciphertext).map_err(|_| "invalid protected evidence ciphertext")?;
     let plain = key.open(context, &ciphertext).map_err(|e| e.to_string())?;
-    let state: State =
-        serde_json::from_slice(&plain).map_err(|_| "invalid protected evidence state")?;
-    if state.protected.is_some() {
-        return Err("nested protected evidence state".into());
-    }
-    Ok(state)
+    serde_json::from_slice(&plain).map_err(|_| "invalid worktree state".into())
 }
 
 /// Parses the public definition and unlocks locally available metadata for normal readers.
-pub(crate) fn read(layout: &Layout, path: &Path) -> format::Parsed {
+pub(crate) fn read(layout: &Layout, lock: &LockFile, path: &Path) -> format::Parsed {
     let Ok(text) = fs::read_to_string(path) else {
         return document::read(path);
     };
     let mut parsed = format::parse(&text, path);
     let mut unlock = || {
-        state_in(layout, &text).map_err(|e| {
+        lock.state(layout, &text).map_err(|e| {
             parsed
                 .diagnostics
                 .push(format::Diagnostic::error("protected-state", e).in_file(path));
         })
     };
     if let Some(file) = &mut parsed.file {
-        if file
-            .state
-            .as_ref()
-            .is_some_and(|state| state.protected.is_some())
+        if parsed.legacy.is_none()
             && let Ok(state) = unlock()
         {
-            file.state = Some(state);
+            file.state = (!state.is_empty()).then_some(state);
         }
     } else if let Some(member) = &mut parsed.member
-        && member
-            .state
-            .as_ref()
-            .is_some_and(|state| state.get("protected").is_some())
+        && member.version != 1
         && let Ok(state) = unlock()
     {
-        member.state = serde_json::to_value(state).ok();
+        member.state = (!state.is_empty()).then_some(state);
     }
     parsed
 }

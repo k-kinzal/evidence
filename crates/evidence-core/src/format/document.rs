@@ -8,8 +8,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use serde::Serialize;
-
 use crate::format::diagnostic::Diagnostic;
 use crate::format::evid::{
     Action, EvidenceFile, FORMAT_VERSION, LocatorValue, Production, Reference, in_namespace,
@@ -17,13 +15,8 @@ use crate::format::evid::{
 };
 use crate::format::member::MemberFile;
 use crate::format::schema;
-use crate::format::state::State;
 use crate::format::template::{self, Placeholder};
 use crate::format::v1;
-
-/// Comment written above the tool-managed `[state]` table.
-pub(crate) const STATE_COMMENT: &str =
-    "# ---- Managed by `evidence`. Do not edit below this line. ----\n";
 
 /// Suffix of evidence files.
 pub(crate) const EVID_SUFFIX: &str = ".evid";
@@ -708,59 +701,14 @@ pub enum WriteError {
     Toml(PathBuf, String),
 }
 
-/// The `[state]` table of an evidence file or a member file, in the format version 2 shape
-/// (empty when there is none).
-pub(crate) fn state_in(text: &str) -> Result<State, String> {
-    let doc: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
-    match doc.get("state") {
-        None => Ok(State::default()),
-        Some(v) => v
-            .clone()
-            .try_into()
-            .map_err(|e: toml::de::Error| e.to_string()),
-    }
-}
-
-/// The definition of an evidence file or a member file, without its `[state]` table, as a
-/// comparable value.
+/// Parses a definition as a comparable value.
 pub(crate) fn definition_in(text: &str) -> Option<toml::Table> {
-    let mut doc: toml::Table = toml::from_str(text).ok()?;
-    doc.remove("state");
-    Some(doc)
+    toml::from_str(text).ok()
 }
 
-/// Returns `text` with its `[state]` table replaced by `state` (removed if `state` is empty).
-pub fn replace_state(text: &str, state: &State) -> Result<String, String> {
-    let mut doc: toml_edit::DocumentMut = text
-        .parse()
-        .map_err(|e: toml_edit::TomlError| e.to_string())?;
-    doc.remove("state");
-    let mut out = doc.to_string();
-    // Drop the marker comment left behind by a previous write.
-    if let Some(pos) = out.find(STATE_COMMENT.trim_end()) {
-        out.truncate(pos);
-    }
-    let trimmed = out.trim_end().len();
-    out.truncate(trimmed);
-    out.push('\n');
-    if !state.is_empty() {
-        #[derive(Serialize)]
-        struct Wrapper<'a> {
-            state: &'a State,
-        }
-        let rendered = toml::to_string(&Wrapper { state }).map_err(|e| e.to_string())?;
-        out.push('\n');
-        out.push_str(STATE_COMMENT);
-        out.push_str(&rendered);
-    }
-    Ok(out)
-}
-
-/// Renders a new evidence file (definition only; state is omitted).
+/// Renders a new evidence definition.
 pub fn render(file: &EvidenceFile) -> Result<String, String> {
-    let mut file = file.clone();
-    file.state = None;
-    toml::to_string(&file).map_err(|e| e.to_string())
+    toml::to_string(file).map_err(|e| e.to_string())
 }
 
 /// Writes `bytes` to `path` atomically.

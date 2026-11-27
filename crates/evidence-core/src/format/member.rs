@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 use crate::format::diagnostic::Diagnostic;
 use crate::format::document::{EVID_SUFFIX, valid_id};
 use crate::format::evid::{EvidenceFile, Format};
-use crate::format::state::MemberState;
+use crate::format::state::{MemberState, State};
 
 /// `[members]` of a parent evidence file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -55,7 +55,7 @@ const RESERVED: &[&str] = &["version", "id", "subject", "members", "state"];
 /// Fields of a member evidence file besides overrides.
 const MEMBER_FIELDS: &[&str] = &["version", "member_of", "member", "state"];
 
-/// A member evidence file as written on disk: parent, key, overrides, and state.
+/// A member definition and its separately loaded state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemberFile {
     /// Format version.
@@ -66,9 +66,9 @@ pub struct MemberFile {
     pub member: String,
     /// Fields that replace the template's (tables are merged).
     pub overrides: Map<String, Value>,
-    /// Tool-managed state, as written (parsed by the rules of `version` when the definition
-    /// is composed).
-    pub state: Option<Value>,
+    /// Tool-managed state loaded separately from the definition.
+    pub state: Option<State>,
+    legacy_state: Option<Value>,
 }
 
 impl MemberFile {
@@ -123,19 +123,38 @@ impl MemberFile {
             }
             overrides.insert(k.clone(), v.clone());
         }
-        // Parsed by the rules of the file's version when the definition is composed.
-        let state = obj.get("state").cloned();
+        let legacy_state = obj.get("state").cloned();
+        if version == Some(2) && legacy_state.is_some() {
+            errors.push(err(
+                "schema",
+                "`state` is stored separately from evidence definitions".into(),
+                "/state",
+            ));
+        }
         Some(if errors.is_empty() {
             Ok(Self {
                 version: u32::try_from(version.unwrap_or(2)).unwrap_or(2),
                 member_of,
                 member,
                 overrides,
-                state,
+                state: None,
+                legacy_state,
             })
         } else {
             Err(errors)
         })
+    }
+
+    pub(crate) fn recorded_entry(&self) -> Option<MemberState> {
+        self.state
+            .as_ref()
+            .and_then(|state| state.member.clone())
+            .or_else(|| {
+                self.legacy_state
+                    .as_ref()
+                    .and_then(|state| state.get("member"))
+                    .and_then(|entry| serde_json::from_value(entry.clone()).ok())
+            })
     }
 
     /// Text of a new member evidence file.
@@ -351,7 +370,7 @@ impl Members {
     }
 
     /// The definition of a member: the template merged with the member's overrides, with
-    /// `{member.FIELD}` replaced, plus id, version, and the member's state. Returns the
+    /// `{member.FIELD}` replaced, plus id and version. Returns the
     /// definition as JSON, ready for schema validation.
     /// `version` is the parent's format version (version 1 templates default `kind` to
     /// `source`).
@@ -373,7 +392,9 @@ impl Members {
         };
         doc.insert("version".into(), version.into());
         doc.insert("id".into(), self.member_id(fields)?.into());
-        if let Some(state) = &member.state {
+        if version == 1
+            && let Some(state) = &member.legacy_state
+        {
             doc.insert("state".into(), state.clone());
         }
         Ok(Value::Object(doc))
@@ -438,7 +459,10 @@ pub(crate) fn compose_file(
         Err(e) => return (None, vec![Diagnostic::error("members", e)]),
     };
     if version != 1 {
-        let (file, mut diagnostics) = crate::format::document::from_json(&doc);
+        let (mut file, mut diagnostics) = crate::format::document::from_json(&doc);
+        if let Some(file) = file.as_mut() {
+            file.state.clone_from(&member.state);
+        }
         if member.version == 1 {
             diagnostics.push(Diagnostic::warning(
                 "legacy-format",

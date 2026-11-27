@@ -64,7 +64,7 @@ pub(crate) fn subject_dependencies(
         .file
         .state
         .as_ref()
-        .is_some_and(|s| s.protected.is_some())
+        .is_some_and(|s| s.pending.is_some())
         && pair
             .file
             .productions

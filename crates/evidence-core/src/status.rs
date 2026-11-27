@@ -743,6 +743,11 @@ fn evaluate_claim(
     }
 
     match pin {
+        None if state.pins_locked => status.push(
+            ClaimHealth::Broken,
+            "pin-locked",
+            "the shared pin record is encrypted and unavailable in this worktree",
+        ),
         None => status.push(
             ClaimHealth::Stale,
             "unpinned",

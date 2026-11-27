@@ -8,7 +8,9 @@ use serde::Serialize;
 
 use crate::format::document::{self, evid_path};
 use crate::format::{ContentMode, Entry, List, MemberFile, OnRemoved, State, entries};
+use crate::journal::Transaction;
 use crate::layout::{DIR, Layout};
+use crate::lockfile::LockFile;
 use crate::remove;
 use crate::snapshot::Resolver;
 use crate::workspace::{MemberOnDisk, Pair, Workspace, inside, normalize};
@@ -213,16 +215,22 @@ fn create(layout: &Layout, evid: &Path, parent_id: &str, entry: &Entry) -> Resul
         member: Some(entry.state.clone()),
         ..State::default()
     };
-    let text = crate::protection::replace_state(
-        layout,
-        &MemberFile::render(parent_id, &entry.key),
-        &state,
-        crate::protection::SharedSnapshots::default(),
-    )?;
-    if let Some(dir) = evid.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    }
-    document::atomic_write(evid, text.as_bytes()).map_err(|e| e.to_string())
+    let result = (|| -> crate::Result<()> {
+        let text = MemberFile::render(parent_id, &entry.key);
+        let mut lock = LockFile::load(layout)?;
+        let mut tx = Transaction::begin(layout, "member")?;
+        tx.stage_bytes(evid, text.as_bytes())?;
+        lock.stage_state(
+            layout,
+            &mut tx,
+            &text,
+            &state,
+            crate::protection::SharedSnapshots::default(),
+        )?;
+        lock.stage(layout, &mut tx)?;
+        tx.commit()
+    })();
+    result.map_err(|e| e.to_string())
 }
 
 /// A member without a command never runs, so its recorded entry is refreshed here.
@@ -236,18 +244,24 @@ fn refresh(layout: &Layout, ws: &Workspace, evid: &Path, entry: &Entry) {
     let Ok(text) = std::fs::read_to_string(evid) else {
         return;
     };
-    let Ok(mut state) = crate::protection::writable_state(layout, &text) else {
+    let Ok(mut lock) = LockFile::load(layout) else {
+        return;
+    };
+    let Ok(mut state) = lock
+        .state(layout, &text)
+        .and_then(crate::protection::writable)
+    else {
         return;
     };
     if state.member.as_ref() != Some(&entry.state) {
         state.member = Some(entry.state.clone());
-        let written = crate::protection::replace_state(
-            layout,
-            &text,
-            &state,
-            crate::protection::previous_shared(&text),
-        )
-        .and_then(|t| document::atomic_write(evid, t.as_bytes()).map_err(|e| e.to_string()));
+        let written = (|| -> crate::Result<()> {
+            let shared = lock.shared(&text)?;
+            let mut tx = Transaction::begin(layout, "member-state")?;
+            lock.stage_state(layout, &mut tx, &text, &state, shared)?;
+            lock.stage(layout, &mut tx)?;
+            tx.commit()
+        })();
         if let Err(e) = written {
             tracing::warn!(evid = %evid.display(), error = %e, "recording member entry");
         }

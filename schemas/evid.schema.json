@@ -86,37 +86,6 @@
       ],
       "type": "object"
     },
-    "ContentRecord": {
-      "additionalProperties": false,
-      "description": "The adopted version of a produced subject.",
-      "properties": {
-        "production": {
-          "description": "The production that wrote it.",
-          "type": "string"
-        },
-        "run": {
-          "description": "The run that wrote it.",
-          "type": "string"
-        },
-        "snapshot": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Snapshot of the adopted content."
-        },
-        "storage": {
-          "$ref": "#/$defs/SnapshotStorage",
-          "description": "The storage class of this snapshot, when recorded."
-        },
-        "updated_at": {
-          "$ref": "#/$defs/TimestampSchema",
-          "description": "When the adopted content last changed."
-        }
-      },
-      "required": [
-        "snapshot",
-        "updated_at"
-      ],
-      "type": "object"
-    },
     "Definition": {
       "additionalProperties": false,
       "properties": {
@@ -180,10 +149,6 @@
           },
           "type": "array"
         },
-        "state": {
-          "$ref": "#/$defs/State",
-          "description": "Tool-managed state. Never edit by hand."
-        },
         "storage": {
           "$ref": "#/$defs/StoragePolicy",
           "description": "Storage policy for new snapshots of this subject."
@@ -222,29 +187,6 @@
       "required": [
         "version",
         "id"
-      ],
-      "type": "object"
-    },
-    "FailedAttempt": {
-      "additionalProperties": false,
-      "description": "A failed attempt of a production.",
-      "properties": {
-        "at": {
-          "$ref": "#/$defs/TimestampSchema",
-          "description": "When the attempt finished."
-        },
-        "message": {
-          "description": "What went wrong.",
-          "type": "string"
-        },
-        "run": {
-          "description": "Run id.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "at",
-        "message"
       ],
       "type": "object"
     },
@@ -287,37 +229,6 @@
           "type": "string"
         }
       ]
-    },
-    "InputVersion": {
-      "additionalProperties": false,
-      "description": "The version of an input used by a run.",
-      "properties": {
-        "fixed": {
-          "description": "The input names a fixed revision.",
-          "type": "boolean"
-        },
-        "fragment": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Hash of the selected part, when the input selects one."
-        },
-        "id": {
-          "description": "Evidence id.",
-          "type": "string"
-        },
-        "snapshot": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Snapshot used."
-        },
-        "storage": {
-          "$ref": "#/$defs/SnapshotStorage",
-          "description": "The storage class of this input snapshot, when recorded."
-        }
-      },
-      "required": [
-        "id",
-        "snapshot"
-      ],
-      "type": "object"
     },
     "Interval": {
       "description": "Duration such as `30m`, `6h`, `1d`, `2weeks`.",
@@ -368,43 +279,17 @@
           "type": "string"
         },
         "members": false,
-        "state": {
-          "$ref": "#/$defs/State"
-        },
+        "state": false,
         "subject": false,
         "version": {
-          "description": "Format version. Must be `2` (`1` before migration).",
-          "enum": [
-            1,
-            2
-          ]
+          "const": 2,
+          "description": "Format version. Must be `2`."
         }
       },
       "required": [
         "version",
         "member_of",
         "member"
-      ],
-      "type": "object"
-    },
-    "MemberState": {
-      "additionalProperties": false,
-      "description": "The list entry a member was produced from.",
-      "properties": {
-        "entry": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Hash of the entry."
-        },
-        "fields": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "description": "Its top-level text, number, and boolean fields, so the member's definition can still be\ncomposed after the entry left the list.",
-          "type": "object"
-        }
-      },
-      "required": [
-        "entry"
       ],
       "type": "object"
     },
@@ -492,130 +377,6 @@
           "type": "string"
         }
       ]
-    },
-    "PinRecord": {
-      "additionalProperties": false,
-      "description": "The pin of a claim: the versions it was confirmed against.",
-      "properties": {
-        "anchor": {
-          "description": "The claimed text, as a hint for re-anchoring suggestions (short ranges only).",
-          "type": "string"
-        },
-        "content": {
-          "$ref": "#/$defs/PinnedContent",
-          "description": "The subject version and the hash of the claimed range."
-        },
-        "definition": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Fingerprint of the normalized claim definition (absent for migrated pins)."
-        },
-        "evidence": {
-          "description": "The version of each reference.",
-          "items": {
-            "$ref": "#/$defs/PinnedReference"
-          },
-          "type": "array"
-        },
-        "fingerprint_version": {
-          "description": "Version of the fingerprint algorithm.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "legacy": {
-          "description": "Migrated from format version 1: needs a new pin.",
-          "type": "boolean"
-        },
-        "recorded_at": {
-          "$ref": "#/$defs/TimestampSchema",
-          "description": "When the pin was recorded."
-        },
-        "recorded_by": {
-          "description": "Who recorded it (a person, or the production for automatic pins).",
-          "type": "string"
-        },
-        "run": {
-          "description": "The run that recorded it (automatic pins).",
-          "type": "string"
-        }
-      },
-      "required": [
-        "recorded_at",
-        "content"
-      ],
-      "type": "object"
-    },
-    "PinnedContent": {
-      "additionalProperties": false,
-      "description": "The subject side of a pin.",
-      "properties": {
-        "fragment": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Hash of the claimed range."
-        },
-        "snapshot": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Snapshot of the subject (absent for some migrated pins)."
-        },
-        "storage": {
-          "$ref": "#/$defs/SnapshotStorage",
-          "description": "The storage class of the subject snapshot, when recorded."
-        }
-      },
-      "required": [
-        "fragment"
-      ],
-      "type": "object"
-    },
-    "PinnedReference": {
-      "additionalProperties": false,
-      "description": "One pinned reference.",
-      "properties": {
-        "fragment": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Hash of the selected part (when the reference has a selector or path)."
-        },
-        "key": {
-          "description": "Reference key (`id`, `id:path`, `id#selector`, `…@revision`).",
-          "type": "string"
-        },
-        "snapshot": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Snapshot of the referenced subject."
-        },
-        "storage": {
-          "$ref": "#/$defs/SnapshotStorage",
-          "description": "The storage class of this referenced snapshot, when recorded."
-        }
-      },
-      "required": [
-        "key",
-        "snapshot"
-      ],
-      "type": "object"
-    },
-    "PlainSnapshot": {
-      "additionalProperties": false,
-      "description": "A shared plaintext snapshot, with the kind needed to reconstruct it.",
-      "properties": {
-        "definition": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Digest of the public definition that adopted the snapshot."
-        },
-        "directory": {
-          "description": "The snapshot is a Merkle directory tree.",
-          "type": "boolean"
-        },
-        "object": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Digest of the root chunk manifest."
-        }
-      },
-      "required": [
-        "object",
-        "definition"
-      ],
-      "type": "object"
     },
     "Primary": {
       "additionalProperties": false,
@@ -714,40 +475,6 @@
       ],
       "type": "object"
     },
-    "ProtectedState": {
-      "additionalProperties": false,
-      "description": "The public wrapper for an authenticated, encrypted state record.",
-      "properties": {
-        "ciphertext": {
-          "description": "Hex-encoded authenticated ciphertext.",
-          "type": "string"
-        },
-        "key": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Identifier of the random local key that sealed this record."
-        },
-        "plain": {
-          "$ref": "#/$defs/PlainSnapshot",
-          "description": "The public manifest of a shareable plaintext snapshot."
-        },
-        "replay": {
-          "$ref": "#/$defs/ReplayState",
-          "description": "Optional reproducible version recoverable from its existing inputs."
-        },
-        "version": {
-          "description": "Format version of the protected record.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "version",
-        "key",
-        "ciphertext"
-      ],
-      "type": "object"
-    },
     "Reference": {
       "anyOf": [
         {
@@ -796,34 +523,6 @@
       ],
       "type": "object"
     },
-    "ReplayState": {
-      "additionalProperties": false,
-      "description": "A protected revision and the source files needed to reopen it.",
-      "properties": {
-        "inputs": {
-          "description": "Evidence IDs whose exact file contents unlock that revision.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "object": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "SHA-256 of the encrypted replay manifest, or payload in the original format."
-        },
-        "version": {
-          "description": "Format version (absent for the original single-file format).",
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "object",
-        "inputs"
-      ],
-      "type": "object"
-    },
     "Requirement": {
       "additionalProperties": false,
       "description": "A requirement defined by this subject (`[[requirements]]`).",
@@ -845,71 +544,6 @@
       "required": [
         "id",
         "select"
-      ],
-      "type": "object"
-    },
-    "RunRecord": {
-      "additionalProperties": false,
-      "description": "The last successful run of a production.",
-      "properties": {
-        "at": {
-          "$ref": "#/$defs/TimestampSchema",
-          "description": "When the run finished (the last successful check, even if nothing changed)."
-        },
-        "claims": {
-          "description": "Claim-writing productions: the ids of the claims returned.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "fingerprint": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Fingerprint of the production definition the run used (absent for migrated records)."
-        },
-        "fingerprint_version": {
-          "description": "Version of the fingerprint algorithm.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "inputs": {
-          "additionalProperties": {
-            "$ref": "#/$defs/InputVersion"
-          },
-          "description": "The version of each input actually used, by input name.",
-          "type": "object"
-        },
-        "legacy": {
-          "description": "Migrated from format version 1: the definition used is not known.",
-          "type": "boolean"
-        },
-        "locator": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "description": "Where the content came from (the evaluated `locator` table).",
-          "type": "object"
-        },
-        "namespace": {
-          "description": "Claim-writing productions: the namespace the run wrote.",
-          "type": "string"
-        },
-        "run": {
-          "description": "Run id (absent for records migrated from format version 1).",
-          "type": "string"
-        },
-        "subject": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "The subject version the run wrote, or read (claims-only runs)."
-        },
-        "subject_storage": {
-          "$ref": "#/$defs/SnapshotStorage",
-          "description": "Storage class of the subject version written by the run, when recorded."
-        }
-      },
-      "required": [
-        "at"
       ],
       "type": "object"
     },
@@ -1026,75 +660,6 @@
       "pattern": "^sha256:[0-9a-f]{64}$",
       "type": "string"
     },
-    "SnapshotStorage": {
-      "description": "The storage class of a recorded version.",
-      "oneOf": [
-        {
-          "const": "plain",
-          "description": "A plaintext snapshot.",
-          "type": "string"
-        },
-        {
-          "const": "encrypted",
-          "description": "A snapshot encrypted by the local store.",
-          "type": "string"
-        }
-      ]
-    },
-    "State": {
-      "additionalProperties": false,
-      "description": "State written by the tool after runs and pins. Humans must not edit it.",
-      "properties": {
-        "content": {
-          "$ref": "#/$defs/ContentRecord",
-          "description": "Produced subjects: the version adopted by the last successful run that wrote it."
-        },
-        "failures": {
-          "additionalProperties": {
-            "$ref": "#/$defs/FailedAttempt"
-          },
-          "description": "The last failed attempt of each production (kept apart from its run record).",
-          "type": "object"
-        },
-        "generated": {
-          "additionalProperties": {
-            "items": {
-              "$ref": "#/$defs/Claim"
-            },
-            "type": "array"
-          },
-          "description": "Claims returned by claim-writing productions, by production name.",
-          "type": "object"
-        },
-        "member": {
-          "$ref": "#/$defs/MemberState",
-          "description": "Members: the parent's list entry this member was last produced from."
-        },
-        "pins": {
-          "additionalProperties": {
-            "$ref": "#/$defs/PinRecord"
-          },
-          "description": "The pin of each claim, by claim id.",
-          "type": "object"
-        },
-        "protected": {
-          "$ref": "#/$defs/ProtectedState",
-          "description": "Encrypted representation of this state when the project protects its metadata."
-        },
-        "runs": {
-          "additionalProperties": {
-            "$ref": "#/$defs/RunRecord"
-          },
-          "description": "The last successful run of each production, by production name.",
-          "type": "object"
-        },
-        "shared_baseline": {
-          "$ref": "#/$defs/SnapshotIdSchema",
-          "description": "Only the publicly shared snapshot was recovered; local execution metadata is unavailable."
-        }
-      },
-      "type": "object"
-    },
     "StoragePolicy": {
       "additionalProperties": false,
       "description": "Per-evidence snapshot encryption policy. An omitted setting inherits from dependencies.",
@@ -1105,11 +670,6 @@
         }
       },
       "type": "object"
-    },
-    "TimestampSchema": {
-      "description": "RFC 3339 timestamp in UTC.",
-      "format": "date-time",
-      "type": "string"
     },
     "WholeFlag": {
       "const": true,
@@ -1148,7 +708,7 @@
   },
   "$id": "https://evidence-cli.github.io/schemas/evid.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Evidence file (format version 2) describing a subject: how it is produced, the claims about it, and the tool-managed state. Usually a sidecar `<subject>.evid` next to the subject; `subject` places the subject elsewhere.",
+  "description": "Evidence file (format version 2) defining a subject, how it is produced, and its claims. Usually a sidecar `<subject>.evid` next to the subject; `subject` places the subject elsewhere.",
   "else": {
     "$ref": "#/$defs/Definition"
   },

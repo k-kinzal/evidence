@@ -9,10 +9,9 @@ use argon2::{Algorithm, Argon2, Block, Params, Version};
 use cas_fs::{ChunkStore, EncryptionKey, Hasher, ObjectId, ObjectKind, Store};
 use zeroize::Zeroizing;
 
-use crate::format::{Production, ProtectedState, ReplayState, SnapshotStorage, State};
+use crate::format::{PendingSnapshot, Production, ReplayState, SnapshotStorage, State};
 use crate::journal::Transaction;
 use crate::layout::Layout;
-use crate::protection;
 use crate::snapshot::{Resolver, Version as SnapshotVersion, disk_snapshot};
 use crate::workspace::{Pair, Workspace};
 use crate::{Error, Result};
@@ -28,6 +27,7 @@ pub(crate) fn publish(
     pair: &Pair,
     state: &State,
     subject: Option<(ObjectId, Option<SnapshotStorage>)>,
+    previous: Option<(&ReplayState, &State)>,
 ) -> Result<Option<ReplayState>> {
     if !layout.config().config.store.encryption_enabled()
         || pair.outside_project
@@ -79,6 +79,13 @@ pub(crate) fn publish(
     if encrypted.kind(&snapshot) != Some(ObjectKind::Blob) {
         return Ok(None);
     }
+    if let Some((replay, old_state)) = previous
+        && replay.version == Some(VERSION)
+        && contains(layout, replay)
+        && same_basis(&pair.id, old_state, state)
+    {
+        return Ok(Some(replay.clone()));
+    }
     if dependencies.len() > 256 {
         return Ok(None);
     }
@@ -121,6 +128,26 @@ pub(crate) fn publish(
 }
 
 type Dependencies = BTreeMap<String, (ObjectId, Option<SnapshotStorage>)>;
+
+fn same_basis(id: &str, before: &State, after: &State) -> bool {
+    before.content.as_ref().is_some_and(|content| {
+        after.content.as_ref().is_some_and(|next| {
+            next.snapshot == content.snapshot
+                && next.storage == content.storage
+                && next.production == content.production
+        })
+    }) && before.generated == after.generated
+        && before.pins == after.pins
+        && before.runs.len() == after.runs.len()
+        && before.runs.iter().all(|(name, run)| {
+            after.runs.get(name).is_some_and(|next| {
+                run.fingerprint == next.fingerprint
+                    && run.inputs == next.inputs
+                    && run.namespace == next.namespace
+            })
+        })
+        && dependencies(id, before) == dependencies(id, after)
+}
 
 fn dependencies(id: &str, state: &State) -> Option<Dependencies> {
     let mut result = BTreeMap::new();
@@ -238,45 +265,6 @@ pub(crate) fn verify(layout: &Layout) -> Result<cas_fs::VerifyReport> {
     Ok(report)
 }
 
-fn create_parent(path: &Path) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| Error::Invalid("missing replay parent".into()))?;
-    fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))
-}
-
-pub(crate) fn cache(
-    layout: &Layout,
-    context: &[u8],
-    protected: &ProtectedState,
-) -> Result<(PathBuf, Vec<u8>)> {
-    let marker = serde_json::to_vec(protected).map_err(|e| Error::Invalid(e.to_string()))?;
-    let id = ObjectId::of(&marker);
-    let mut auth = b"evidence-restored-state/v1\0".to_vec();
-    auth.extend_from_slice(context);
-    auth.extend_from_slice(id.as_bytes());
-    Ok((
-        layout.meta_dir().join("private/replayed").join(id.to_hex()),
-        auth,
-    ))
-}
-
-pub(crate) fn cached_state(
-    layout: &Layout,
-    context: &[u8],
-    protected: &ProtectedState,
-) -> Result<Option<State>, String> {
-    let Some(key) = layout.key() else {
-        return Ok(None);
-    };
-    let (path, auth) = cache(layout, context, protected).map_err(|e| e.to_string())?;
-    match fs::read_to_string(&path) {
-        Ok(text) => protection::open_state(key, &auth, &text).map(Some),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
 /// Attempts to materialize locked accepted revisions whose fixed inputs are already present.
 /// Returns their IDs so this update can leave the recovered versions in place.
 pub(crate) fn restore_available(
@@ -285,9 +273,9 @@ pub(crate) fn restore_available(
     only: Option<&HashSet<String>>,
     tried: &mut BTreeMap<String, ObjectId>,
 ) -> Result<HashSet<String>> {
-    let Some(key) = layout.key() else {
+    if layout.key().is_none() {
         return Ok(HashSet::new());
-    };
+    }
     let mut restored = HashSet::new();
     loop {
         let mut round = Vec::new();
@@ -297,11 +285,10 @@ pub(crate) fn restore_available(
             {
                 continue;
             }
-            let Some(protected) = pair.file.state.as_ref().and_then(|s| s.protected.as_ref())
-            else {
+            let Some(pending) = pair.file.state.as_ref().and_then(|s| s.pending.as_ref()) else {
                 continue;
             };
-            let Some(replay) = &protected.replay else {
+            let Some(replay) = &pending.replay else {
                 continue;
             };
             if replay.inputs.is_empty()
@@ -315,21 +302,12 @@ pub(crate) fn restore_available(
                 )));
             }
             let state = match replay.version {
-                Some(VERSION) => restore_chunked(layout, ws, pair, protected, replay, tried, key)?,
+                Some(VERSION) => restore_chunked(layout, ws, pair, pending, replay, tried)?,
                 None => {
                     let Some(inputs) = inputs_on_disk(layout, ws, &replay.inputs)? else {
                         continue;
                     };
-                    restore_one(
-                        layout,
-                        ws.store(),
-                        pair,
-                        protected,
-                        replay,
-                        &inputs,
-                        tried,
-                        key,
-                    )?
+                    restore_one(layout, ws.store(), pair, pending, replay, &inputs, tried)?
                 }
                 Some(_) => return Err(Error::Invalid("unsupported replay format".into())),
             };
@@ -446,10 +424,9 @@ fn restore_chunked(
     layout: &Layout,
     ws: &Workspace,
     pair: &Pair,
-    protected: &ProtectedState,
+    pending: &PendingSnapshot,
     replay: &ReplayState,
     tried: &mut BTreeMap<String, ObjectId>,
-    local_key: &EncryptionKey,
 ) -> Result<Option<State>> {
     let chunks = chunk_store(layout);
     if !chunks.contains(&replay.object) {
@@ -500,8 +477,7 @@ fn restore_chunked(
     io::copy(&mut decoded, &mut file).map_err(|e| Error::io(&body, e))?;
     drop(file);
     let actual = cas_fs::hash_path(&body)?;
-    if state.protected.is_some()
-        || state.shared_baseline.is_some()
+    if state.shared_baseline.is_some()
         || state
             .content
             .as_ref()
@@ -527,18 +503,17 @@ fn restore_chunked(
     if store.scoped(cas_fs::Storage::Encrypted).put_path(&body)? != actual {
         return Err(Error::Invalid("invalid restored snapshot".into()));
     }
-    commit_restored(layout, pair, protected, actual, &body, &state, local_key)?;
+    commit_restored(layout, pair, pending, actual, &body, &state)?;
     Ok(Some(state))
 }
 
 pub(crate) fn commit_restored(
     layout: &Layout,
     pair: &Pair,
-    protected: &ProtectedState,
+    pending: &PendingSnapshot,
     snapshot: ObjectId,
     staged: &Path,
     state: &State,
-    local_key: &EncryptionKey,
 ) -> Result<()> {
     if fs::symlink_metadata(&pair.subject_path).is_ok_and(|m| m.is_symlink())
         || pair.subject_path.exists() && disk_snapshot(&pair.subject_path) != Some(snapshot)
@@ -549,26 +524,19 @@ pub(crate) fn commit_restored(
         )));
     }
     let text = fs::read_to_string(&pair.evid_path).map_err(|e| Error::io(&pair.evid_path, e))?;
-    if protection::previous_protected(&text).as_ref() != Some(protected) {
+    let lock = crate::lockfile::LockFile::load(layout)?;
+    if lock.pending(&text)?.as_ref() != Some(pending) {
         return Err(Error::Conflict(format!(
             "{} changed while recovering its accepted version",
             pair.evid_rel
         )));
     }
-    let context = protection::state_context(&text).map_err(Error::Invalid)?;
-    let (cache_path, auth) = cache(layout, &context, protected)?;
-    create_parent(&cache_path)?;
-    let metadata =
-        Zeroizing::new(serde_json::to_vec(state).map_err(|e| Error::Invalid(e.to_string()))?);
-    let local = local_key
-        .seal(&auth, &metadata)
-        .map_err(|e| replay_io(&e))?;
     let mut transaction = Transaction::begin(layout, "replay")?;
     let result = (|| {
         if !pair.subject_path.exists() {
             transaction.stage_path(&pair.subject_path, staged)?;
         }
-        transaction.stage_bytes(&cache_path, hex::encode(local).as_bytes())
+        lock.stage_restored_state(layout, &mut transaction, &text, state)
     })();
     if let Err(error) = result {
         transaction.abort();
@@ -582,11 +550,10 @@ fn restore_one(
     layout: &Layout,
     store: &Store,
     pair: &Pair,
-    protected: &ProtectedState,
+    pending: &PendingSnapshot,
     replay: &ReplayState,
     inputs: &[Zeroizing<Vec<u8>>],
     tried: &mut BTreeMap<String, ObjectId>,
-    local_key: &EncryptionKey,
 ) -> Result<Option<State>> {
     let path = object_path(layout, replay.object);
     let Some(object) = read_bounded(&path, LEGACY_LIMIT + STATE_LIMIT + 128)? else {
@@ -616,11 +583,10 @@ fn restore_one(
     let state: State = serde_json::from_slice(metadata)
         .map_err(|_| Error::Invalid("invalid restored state".into()))?;
     let actual = ObjectId::of(body);
-    if state.protected.is_some()
-        || state
-            .content
-            .as_ref()
-            .is_some_and(|s| s.snapshot != actual || s.storage == Some(SnapshotStorage::Plain))
+    if state
+        .content
+        .as_ref()
+        .is_some_and(|s| s.snapshot != actual || s.storage == Some(SnapshotStorage::Plain))
     {
         return Err(Error::Invalid("invalid restored snapshot".into()));
     }
@@ -640,42 +606,15 @@ fn restore_one(
             pair.subject_rel
         )));
     }
-    let text = fs::read_to_string(&pair.evid_path).map_err(|e| Error::io(&pair.evid_path, e))?;
-    if crate::format::document::state_in(&text)
-        .ok()
-        .and_then(|s| s.protected)
-        .as_ref()
-        != Some(protected)
-    {
-        return Err(Error::Conflict(format!(
-            "{} changed while recovering its accepted version",
-            pair.evid_rel
-        )));
-    }
-    let state_context = protection::state_context(&text).map_err(Error::Invalid)?;
-    let (cache_path, auth) = cache(layout, &state_context, protected)?;
-    create_parent(&cache_path)?;
     for ((_, storage), input) in dependencies.values().zip(inputs) {
         let storage = storage.unwrap_or(SnapshotStorage::Encrypted);
         store.scoped(storage.into()).put_bytes(input)?;
     }
     store.scoped(cas_fs::Storage::Encrypted).put_bytes(body)?;
-    let mut transaction = Transaction::begin(layout, "replay")?;
-    let result = (|| {
-        if !pair.subject_path.is_file() {
-            transaction.stage_bytes(&pair.subject_path, body)?;
-        }
-        let local = local_key
-            .seal(&auth, metadata)
-            .map_err(|e| Error::Invalid(e.to_string()))?;
-        transaction.stage_bytes(&cache_path, hex::encode(local).as_bytes())?;
-        Ok(())
-    })();
-    if let Err(error) = result {
-        transaction.abort();
-        return Err(error);
-    }
-    transaction.commit()?;
+    let tmp = staging_dir(layout)?;
+    let staged = tmp.path().join("subject");
+    fs::write(&staged, body).map_err(|e| Error::io(&staged, e))?;
+    commit_restored(layout, pair, pending, actual, &staged, &state)?;
     Ok(Some(state))
 }
 
@@ -739,8 +678,11 @@ writes = ["subject"]
 inputs = ["raw"]
 run = ["false"]
 "#;
-        let text = protection::replace_state(
+        let mut lock = crate::lockfile::LockFile::load(&author).unwrap();
+        let mut tx = Transaction::begin(&author, "test").unwrap();
+        lock.stage_state(
             &author,
+            &mut tx,
             definition,
             &state,
             SharedSnapshots {
@@ -753,7 +695,14 @@ run = ["false"]
             },
         )
         .unwrap();
-        fs::write(checkout.root().join("result.txt.evid"), text).unwrap();
+        lock.stage(&author, &mut tx).unwrap();
+        tx.commit().unwrap();
+        fs::copy(
+            author.meta_dir().join("evidence.lock"),
+            checkout.meta_dir().join("evidence.lock"),
+        )
+        .unwrap();
+        fs::write(checkout.root().join("result.txt.evid"), definition).unwrap();
         fs::write(checkout.root().join("raw.txt"), raw).unwrap();
         fs::write(
             checkout.root().join("raw.txt.evid"),

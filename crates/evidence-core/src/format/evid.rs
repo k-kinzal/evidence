@@ -23,7 +23,7 @@ pub(crate) const FORMAT_VERSION: u32 = 2;
 #[serde(deny_unknown_fields)]
 #[schemars(
     title = "Evidence file",
-    description = "Evidence file (format version 2) describing a subject: how it is produced, the claims about it, and the tool-managed state. Usually a sidecar `<subject>.evid` next to the subject; `subject` places the subject elsewhere."
+    description = "Evidence file (format version 2) defining a subject, how it is produced, and its claims. Usually a sidecar `<subject>.evid` next to the subject; `subject` places the subject elsewhere."
 )]
 pub struct EvidenceFile {
     /// Format version. Must be `2` (version 1 files are migrated with `evidence migrate`).
@@ -93,8 +93,8 @@ pub struct EvidenceFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wiki: Option<WikiPage>,
 
-    /// Tool-managed state. Never edit by hand.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Tool-managed state loaded separately from the definition.
+    #[serde(skip)]
     pub state: Option<State>,
 }
 

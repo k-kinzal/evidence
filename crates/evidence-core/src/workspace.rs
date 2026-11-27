@@ -255,6 +255,7 @@ impl Workspace {
     }
 
     fn from_paths(layout: &Layout, paths: &[PathBuf]) -> Result<Self> {
+        let lock = crate::lockfile::LockFile::load(layout)?;
         let mut ws = Self {
             store: layout.store()?,
             encryption: layout.config().config.store.encryption_enabled(),
@@ -269,7 +270,7 @@ impl Workspace {
         let parsed: Vec<_> = paths
             .iter()
             .map(|path| {
-                let parsed = crate::protection::read(layout, path);
+                let parsed = crate::protection::read(layout, &lock, path);
                 let subject = parsed.file.as_ref().and_then(|f| subject_of(path, f));
                 (path, parsed, subject)
             })
@@ -366,11 +367,7 @@ impl Workspace {
             let current = list
                 .and_then(|l| l.iter().find(|e| e.key == member.member))
                 .map(|e| e.state.clone());
-            let recorded = member
-                .state
-                .as_ref()
-                .and_then(|s| s.get("member"))
-                .and_then(|m| serde_json::from_value::<MemberState>(m.clone()).ok());
+            let recorded = member.recorded_entry();
             let known = current.clone().or(recorded);
             let Some(known) = known else {
                 ws.diagnostics.push(err(

@@ -25,6 +25,7 @@ use crate::format::{
 use crate::history::{self, Event, PinEvent};
 use crate::journal::{self, Transaction};
 use crate::layout::Layout;
+use crate::lockfile::LockFile;
 use crate::membership::{self, MemberAction, MemberChange};
 use crate::pin::{self, PinSource};
 use crate::snapshot::{ResolveError, Resolver, Version, capture, disk_snapshot, snapshot_filter};
@@ -424,7 +425,7 @@ pub(crate) fn update(
             .file
             .state
             .as_ref()
-            .and_then(|s| s.protected.as_ref())
+            .and_then(|s| s.pending.as_ref())
             .is_some_and(|p| p.plain.is_some());
         report.skipped.push(Skipped {
             id: pair.id.clone(),
@@ -446,7 +447,7 @@ fn locked(pair: &Pair) -> bool {
     pair.file
         .state
         .as_ref()
-        .and_then(|s| s.protected.as_ref())
+        .and_then(|s| s.pending.as_ref())
         .is_some_and(|p| p.replay.is_some() || p.plain.is_some())
 }
 
@@ -1247,8 +1248,18 @@ fn adopt_staged(
         .file
         .production(&node.production)
         .ok_or("the production disappeared during the run")?;
-    let mut state = crate::protection::writable_state(layout, &text)
+    let mut lock = LockFile::load(layout).map_err(|e| e.to_string())?;
+    let mut state = lock
+        .state(layout, &text)
+        .and_then(crate::protection::writable)
         .map_err(|e| format!("{}: {e}", pair.evid_rel))?;
+    if state.pins_locked && !staged.pins.is_empty() {
+        return Err(
+            "the existing shared pins are encrypted; open them before replacing them".into(),
+        );
+    }
+    let previous = lock.shared(&text).map_err(|e| e.to_string())?;
+    let previous_state = state.clone();
     let mut changed = false;
     let resolver = Resolver::new(ws);
 
@@ -1364,18 +1375,27 @@ fn adopt_staged(
                 .as_ref()
                 .map(|v| (v.snapshot(), v.storage()))
         });
-    let replay = crate::replay::publish(layout, &resolver, pair, &state, version)
-        .map_err(|e| e.to_string())?;
+    let replay = crate::replay::publish(
+        layout,
+        &resolver,
+        pair,
+        &state,
+        version,
+        previous
+            .replay
+            .as_ref()
+            .map(|replay| (replay, &previous_state)),
+    )
+    .map_err(|e| e.to_string())?;
     let plain = if staged.output.is_some() || staged.pinned_editable.is_some() {
         crate::plain::publish(layout, ws.store(), pair, version).map_err(|e| e.to_string())?
     } else {
-        crate::protection::previous_shared(&text).plain
+        previous.plain
     };
     let shared = crate::protection::SharedSnapshots { replay, plain };
-    let new_text = crate::protection::replace_state(layout, &text, &state, shared)
+    lock.stage_state(layout, &mut tx, &text, &state, shared)
         .map_err(|e| format!("{}: {e}", pair.evid_rel))?;
-    tx.stage_bytes(&pair.evid_path, new_text.as_bytes())
-        .map_err(|e| e.to_string())?;
+    lock.stage(layout, &mut tx).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(if changed {
         RunStatus::Changed
@@ -1395,7 +1415,11 @@ fn record_failure(
 ) -> Result<()> {
     let text =
         std::fs::read_to_string(&pair.evid_path).map_err(|e| Error::io(&pair.evid_path, e))?;
-    let mut state = crate::protection::writable_state(layout, &text).map_err(Error::Invalid)?;
+    let mut lock = LockFile::load(layout)?;
+    let mut state = lock
+        .state(layout, &text)
+        .and_then(crate::protection::writable)
+        .map_err(Error::Invalid)?;
     state.failures.insert(
         node.production.clone(),
         FailedAttempt {
@@ -1404,15 +1428,11 @@ fn record_failure(
             message: message.to_owned(),
         },
     );
-    let new_text = crate::protection::replace_state(
-        layout,
-        &text,
-        &state,
-        crate::protection::previous_shared(&text),
-    )
-    .map_err(Error::Invalid)?;
-    document::atomic_write(&pair.evid_path, new_text.as_bytes())?;
-    Ok(())
+    let shared = lock.shared(&text)?;
+    let mut tx = Transaction::begin(layout, "failed-run")?;
+    lock.stage_state(layout, &mut tx, &text, &state, shared)?;
+    lock.stage(layout, &mut tx)?;
+    tx.commit()
 }
 
 /// Writes the `{context}` file (version 2): what a command (e.g. an AI agent) needs to know

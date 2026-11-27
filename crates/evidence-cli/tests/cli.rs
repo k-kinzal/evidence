@@ -547,6 +547,7 @@ fn pin_is_explicit_and_runs_nothing() {
     );
     let raw = read(&p, "raw.json.evid");
     let before = read(&p, "report.md.evid");
+    let before_lock = read(&p, ".evidence/evidence.lock");
 
     p.cmd(&["update", "--pin"]).assert().code(2);
     p.cmd(&["update", "--pin", "report#nope"])
@@ -566,7 +567,8 @@ fn pin_is_explicit_and_runs_nothing() {
     p.cmd(&["update", "--pin", "report#findings"])
         .assert()
         .success();
-    assert_ne!(read(&p, "report.md.evid"), before);
+    assert_eq!(read(&p, "report.md.evid"), before);
+    assert_ne!(read(&p, ".evidence/evidence.lock"), before_lock);
     assert_eq!(read(&p, "raw.json.evid"), raw, "nothing ran");
     assert!(!read(&p, "raw.json").contains("new"));
 
@@ -795,12 +797,9 @@ fn broad_ranges_are_reported_until_acknowledged() {
 fn subject_coverage_honours_scope_and_reports_narrow_share() {
     let p = usage_project();
     let page = std::fs::read_to_string(p.dir.child("page.md.evid").path()).unwrap();
-    let (definition, _state) = page.split_once("# ---- Managed").unwrap();
     p.write(
         "page.md.evid",
-        &format!(
-            "{definition}\n[[scope]]\nselect = {{ heading = \"## Three\" }}\nexclude = true\n"
-        ),
+        &format!("{page}\n[[scope]]\nselect = {{ heading = \"## Three\" }}\nexclude = true\n"),
     );
     let c = &p.json(&["coverage", "page"])["coverage"];
     assert_eq!(c["counts"]["excluded"], 2);
@@ -853,7 +852,12 @@ fn normal_update_encrypts_objects_and_metadata_and_recovers_accepted_file() {
     let snapshot = ObjectId::of(&article);
     let plain_hash = ObjectId::of(source).to_hex();
     let evidence = std::fs::read_to_string(p.dir.path().join("article.md.evid")).unwrap();
-    assert!(evidence.contains("[state.protected.replay]"));
+    let lock_text = std::fs::read_to_string(p.dir.path().join(".evidence/evidence.lock")).unwrap();
+    let lock: Value = serde_json::from_str(&lock_text).unwrap();
+    assert_eq!(lock["evidence"]["article"]["replay"]["version"], 2);
+    assert!(!evidence.contains("[state"));
+    assert!(!lock_text.contains(&plain_hash));
+    assert!(!lock_text.contains(&snapshot.to_hex()));
     assert!(!evidence.contains(&plain_hash));
     assert!(!evidence.contains(&snapshot.to_hex()));
     assert!(
@@ -876,6 +880,7 @@ fn normal_update_encrypts_objects_and_metadata_and_recovers_accepted_file() {
 
     // Simulate a fresh checkout with its normal definitions and the shared ciphertext only.
     let restored = Project::new();
+    restored.write(".evidence/evidence.lock", &lock_text);
     for file in ["raw.txt.evid", "article.md.evid", "write.sh"] {
         std::fs::copy(p.dir.path().join(file), restored.dir.path().join(file)).unwrap();
     }
@@ -1031,7 +1036,12 @@ locator = { note = ["cat", "local-marker"] }
     let source = p.dir.path().join("archive/sub/data.bin");
     let expected = cas_fs::hash_path(&source).unwrap();
     let original_evid = std::fs::read_to_string(p.dir.path().join("archive.evid")).unwrap();
-    assert!(original_evid.contains("[state.protected.plain]"));
+    let lock: Value = serde_json::from_str(
+        &std::fs::read_to_string(p.dir.path().join(".evidence/evidence.lock")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lock["evidence"]["archive"]["plain"]["directory"], true);
+    assert!(!original_evid.contains("[state"));
     assert!(!original_evid.contains("private-run-metadata"));
 
     let clone = commit_and_clone(&p, &["archive.evid", "produce.sh"]);
@@ -1182,4 +1192,105 @@ fn git_does_not_convert_line_endings_in_published_chunks() {
         body.as_bytes()
     );
     clone.cmd(&["store", "verify"]).assert().success();
+}
+
+#[test]
+fn git_shares_pins_without_rewriting_definitions_or_exposing_private_fragments() {
+    let p = Project::new();
+    let upstream = TempDir::new().unwrap();
+    let raw = upstream.path().join("private.txt");
+    std::fs::write(&raw, "private prerequisite 3eadf11868\n").unwrap();
+    p.cmd(&[
+        "add",
+        "raw.txt",
+        "--kind",
+        "source",
+        "--",
+        "cp",
+        raw.to_str().unwrap(),
+        "{output}",
+    ])
+    .assert()
+    .success();
+    let public_definition = r#"version = 2
+id = "public"
+[storage]
+encryption = false
+
+[[claims]]
+id = "summary"
+select = {lines = "1"}
+evidence = ["public"]
+"#;
+    let private_definition = r#"version = 2
+id = "private"
+
+[[claims]]
+id = "summary"
+select = {lines = "1"}
+evidence = ["raw"]
+"#;
+    let anchor = "a sensitive summary that must stay encrypted";
+    p.write("public.txt.evid", public_definition);
+    p.write("private.txt.evid", private_definition);
+    p.write("public.txt", "an approved public summary\n");
+    p.write("private.txt", &format!("{anchor}\n"));
+    p.cmd(&["update", "raw"]).assert().success();
+    p.cmd(&["update", "--pin", "public", "private"])
+        .assert()
+        .success();
+
+    let lock = std::fs::read_to_string(p.dir.path().join(".evidence/evidence.lock")).unwrap();
+    let document: Value = serde_json::from_str(&lock).unwrap();
+    assert_eq!(document["evidence"]["public"]["pins"]["storage"], "plain");
+    assert!(document["evidence"]["public"]["pins"]["claims"]["summary"]["anchor"].is_null());
+    assert_eq!(
+        document["evidence"]["private"]["pins"]["storage"],
+        "encrypted"
+    );
+    assert!(document["evidence"]["private"]["pins"]["claims"].is_null());
+    assert!(!lock.contains(anchor));
+    assert!(!lock.contains(&cas_fs::ObjectId::of(anchor.as_bytes()).to_hex()));
+    for (id, expected) in [
+        ("public", public_definition),
+        ("private", private_definition),
+    ] {
+        assert_eq!(
+            std::fs::read_to_string(p.dir.path().join(format!("{id}.txt.evid"))).unwrap(),
+            expected
+        );
+    }
+
+    let clone = commit_and_clone(&p, &["raw.txt.evid", "public.txt.evid", "private.txt.evid"]);
+    clone.cmd(&["store", "verify"]).assert().success();
+    let loaded = evidence_core::Project::open(clone.dir.path()).unwrap();
+    assert!(loaded.pair("private").unwrap().file.state().pins_locked);
+
+    clone.cmd(&["update", "raw"]).assert().success();
+    let loaded = evidence_core::Project::open(clone.dir.path()).unwrap();
+    for id in ["public", "private"] {
+        let status = loaded.status(loaded.pair(id).unwrap());
+        assert_eq!(
+            status.claims[0].health,
+            evidence_core::ClaimHealth::Matched,
+            "{status:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(clone.dir.path().join(".evidence/evidence.lock")).unwrap(),
+        lock
+    );
+    clone
+        .cmd(&["remove", "public", "--keep-subject"])
+        .assert()
+        .success();
+    let updated: Value = serde_json::from_str(
+        &std::fs::read_to_string(clone.dir.path().join(".evidence/evidence.lock")).unwrap(),
+    )
+    .unwrap();
+    assert!(updated["evidence"]["public"].is_null());
+    assert_eq!(
+        updated["evidence"]["private"],
+        document["evidence"]["private"]
+    );
 }

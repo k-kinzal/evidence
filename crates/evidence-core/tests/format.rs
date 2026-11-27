@@ -1,10 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use std::path::Path;
 
-use evidence_core::format::{
-    ContentMode, ContentRecord, ObjectId, Output, RefVersion, Selector, State,
-};
-use evidence_core::format::{evid_path, parse, render, replace_state, subject_path};
+use evidence_core::format::{ContentMode, Output, RefVersion, Selector};
+use evidence_core::format::{evid_path, parse, render, subject_path};
 
 fn fixture(name: &str) -> String {
     std::fs::read_to_string(Path::new("tests/fixtures").join(name)).unwrap()
@@ -144,42 +142,24 @@ fn claim_rules() {
 }
 
 #[test]
-fn state_write_preserves_definition() {
-    let original = fixture("source.json.evid");
-    let mut state = State {
-        content: Some(ContentRecord {
-            snapshot: ObjectId::of(b"data"),
-            storage: None,
-            updated_at: "2026-01-01T00:00:00Z".parse().unwrap(),
-            production: Some("fetch".into()),
-            run: None,
-        }),
-        ..State::default()
-    };
-    let once = replace_state(&original, &state).unwrap();
-    assert!(
-        once.starts_with(original.trim_end()),
-        "definition must be kept verbatim"
-    );
-    assert!(once.contains("# Raw findings from BigQuery"));
-    assert!(once.contains("--nouse_legacy_sql\"]   # any program"));
-
-    // Rewriting is idempotent and replaces rather than appends.
-    let twice = replace_state(&once, &state).unwrap();
-    assert_eq!(once, twice);
-    if let Some(c) = state.content.as_mut() {
-        c.snapshot = ObjectId::of(b"other");
+fn version_two_definitions_reject_embedded_state() {
+    for definition in [
+        "version = 2\nid = \"source\"\n",
+        "version = 2\nmember_of = \"list\"\nmember = \"entry\"\n",
+    ] {
+        let text = format!("{definition}\n[state]\n");
+        let parsed = parse(&text, Path::new("subject.evid"));
+        assert!(
+            parsed.file.is_none() && parsed.member.is_none(),
+            "{definition}"
+        );
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("state"))
+        );
     }
-    let third = replace_state(&twice, &state).unwrap();
-    assert_eq!(third.matches("[state.content]").count(), 1);
-
-    let parsed = parse(&third, Path::new("x"));
-    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-    assert_eq!(parsed.file.unwrap().state.unwrap().content, state.content);
-
-    // Clearing state removes the table and the marker comment.
-    let cleared = replace_state(&third, &State::default()).unwrap();
-    assert_eq!(cleared.trim_end(), original.trim_end());
 }
 
 #[test]

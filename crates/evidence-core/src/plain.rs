@@ -6,10 +6,9 @@ use std::io::{Read, copy, sink};
 use cas_fs::{ChunkStore, EntryKind, ObjectId, ObjectKind, Storage, Store, Tree};
 
 use crate::format::{
-    ContentMode, ContentRecord, PlainSnapshot, ProtectedState, SnapshotStorage, State,
+    ContentMode, ContentRecord, PendingSnapshot, PlainSnapshot, SnapshotStorage, State,
 };
 use crate::layout::Layout;
-use crate::protection;
 use crate::replay;
 use crate::snapshot::disk_snapshot;
 use crate::workspace::{Pair, Workspace};
@@ -252,6 +251,19 @@ fn object_of(plain: PlainSnapshot) -> (ObjectKind, ObjectId) {
     (kind, plain.object)
 }
 
+/// Returns the logical digest of a published root without materializing its data.
+pub(crate) fn snapshot_id(layout: &Layout, plain: PlainSnapshot) -> Result<ObjectId> {
+    let chunks = chunk_store(layout);
+    let reader = chunks.open(&plain.object)?;
+    if plain.directory {
+        let size = reader.size();
+        let (tree, _) = read_tree(reader, size)?;
+        Ok(tree.id())
+    } else {
+        Ok(reader.digest())
+    }
+}
+
 pub(crate) fn verify(
     layout: &Layout,
     roots: impl IntoIterator<Item = PlainSnapshot>,
@@ -274,32 +286,28 @@ pub(crate) fn restore_available(
     ws: &mut Workspace,
     only: Option<&HashSet<String>>,
 ) -> Result<HashSet<String>> {
-    let Some(key) = layout.key() else {
-        return Ok(HashSet::new());
-    };
+    let lock = crate::lockfile::LockFile::load(layout)?;
     let mut recovered = Vec::new();
     for pair in ws.pairs() {
-        if only.is_some_and(|scope| !scope.contains(&pair.id))
+        if pair.legacy
+            || only.is_some_and(|scope| !scope.contains(&pair.id))
             || !replay::safe_subject(layout.root(), &pair.subject_path)
         {
             continue;
         }
         let local = pair.file.state();
-        let unresolved = local.protected.is_some();
+        let unresolved = local.pending.is_some();
         if !unresolved && pair.subject_path.exists() {
             continue;
         }
         let text =
             std::fs::read_to_string(&pair.evid_path).map_err(|e| Error::io(&pair.evid_path, e))?;
-        let Some(protected) = protection::previous_protected(&text) else {
+        let Some(pending) = lock.pending(&text)? else {
             continue;
         };
-        let Some(plain) = protected.plain else {
+        let Some(plain) = pending.plain else {
             continue;
         };
-        if protected.version != 1 || protected.replay.is_some() {
-            return Err(invalid());
-        }
         let chunks = chunk_store(layout);
         let store = ws.store().scoped(Storage::Plain);
         let actual = import(
@@ -310,7 +318,7 @@ pub(crate) fn restore_available(
             &mut HashMap::new(),
             0,
         )?;
-        let state = recovered_state(pair, &protected, local, actual, plain)?;
+        let state = recovered_state(pair, &pending, local, actual, plain)?;
         let tmp = replay::staging_dir(layout)?;
         let body = tmp.path().join("subject");
         if !pair.subject_path.exists() {
@@ -319,7 +327,7 @@ pub(crate) fn restore_available(
                 return Err(invalid());
             }
         }
-        replay::commit_restored(layout, pair, &protected, actual, &body, &state, key)?;
+        replay::commit_restored(layout, pair, &pending, actual, &body, &state)?;
         recovered.push((pair.id.clone(), state));
     }
     let mut restored = HashSet::new();
@@ -334,13 +342,15 @@ pub(crate) fn restore_available(
 
 fn recovered_state(
     pair: &Pair,
-    protected: &ProtectedState,
+    pending: &PendingSnapshot,
     local: State,
     snapshot: ObjectId,
     plain: PlainSnapshot,
 ) -> Result<State> {
-    if local.protected.as_ref() == Some(protected) {
+    if local.pending.as_ref() == Some(pending) {
         return Ok(State {
+            pins: local.pins,
+            pins_locked: local.pins_locked,
             shared_baseline: Some(plain.definition),
             content: (pair.file.content_mode() == ContentMode::Produced).then(|| ContentRecord {
                 snapshot,

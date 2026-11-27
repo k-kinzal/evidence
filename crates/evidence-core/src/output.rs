@@ -23,6 +23,7 @@ pub struct PairView {
     /// Subject, relative to the project root.
     pub subject: String,
     /// The parsed evidence file (definition and state).
+    #[serde(serialize_with = "definition_with_state")]
     pub definition: crate::format::EvidenceFile,
     /// Freshness.
     pub status: PairStatus,
@@ -36,6 +37,24 @@ pub struct PairView {
     pub dependencies: Vec<crate::workspace::Edge>,
     /// Pairs that relate to this one, with the relation they use.
     pub dependents: Vec<crate::workspace::Edge>,
+}
+
+fn definition_with_state<S: serde::Serializer>(
+    file: &crate::format::EvidenceFile,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Definition<'a> {
+        #[serde(flatten)]
+        file: &'a crate::format::EvidenceFile,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        state: Option<&'a crate::format::State>,
+    }
+    Definition {
+        file,
+        state: file.state.as_ref(),
+    }
+    .serialize(serializer)
 }
 
 impl PairView {

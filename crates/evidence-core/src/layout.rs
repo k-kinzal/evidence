@@ -29,7 +29,7 @@ const GITIGNORE: &str = "# Local, regenerable, or per-user files.
 # objects/
 ";
 const LOCAL_IGNORE: &[u8] = b"/index.db\n/index.db-*\n/tmp/\n/cache/\n/private/\n/journal/\n/backup/\n/objects/tmp/\n/objects/blob/\n/objects/tree/\n/objects/sealed/\n/objects/replay/blob/\n/history/\n/lock\n/config.local.toml\n";
-const CHUNK_ATTRIBUTES: &[u8] = b"objects/plain/v2/** binary -filter -ident\nobjects/replay/v2/** binary -filter -ident -delta\n";
+const CHUNK_ATTRIBUTES: &[u8] = b"objects/plain/v2/** binary -filter -ident\nobjects/replay/v2/** binary -filter -ident -delta\nobjects/pins/v1/** binary -filter -ident -delta\n";
 
 /// Configuration layers, lowest precedence first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

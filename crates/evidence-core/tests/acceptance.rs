@@ -33,16 +33,7 @@ impl Fx {
 
     /// Replaces the definition of an evidence file, keeping its state.
     fn redefine(&self, rel: &str, definition: &str) {
-        let id = self
-            .project()
-            .pairs()
-            .iter()
-            .find(|p| p.evid_rel == rel)
-            .map(|p| p.id.clone())
-            .unwrap();
-        let state = self.state(&id);
-        let text = evidence_core::format::replace_state(definition, &state).unwrap();
-        self.write(rel, &text);
+        self.write(rel, definition);
     }
 
     fn read(&self, rel: &str) -> String {

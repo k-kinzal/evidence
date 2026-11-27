@@ -1,4 +1,4 @@
-//! Tool-managed state (`[state]`) of an evidence file, format version 2.
+//! Tool-managed state for an evidence definition.
 //!
 //! The state keeps three kinds of records apart (see `docs/semantics.md`): the content a
 //! produced subject adopted, the run record (and failed attempt) of each production, and the
@@ -17,13 +17,13 @@ use crate::format::evid::Claim;
 /// Version of the fingerprint algorithms written by this version of Evidence.
 pub const FINGERPRINT_VERSION: u32 = 1;
 
-/// State written by the tool after runs and pins. Humans must not edit it.
+/// State recorded by the tool after runs and pins.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct State {
-    /// Encrypted representation of this state when the project protects its metadata.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protected: Option<ProtectedState>,
+    /// Shared snapshot awaiting restoration in this worktree.
+    #[serde(skip)]
+    pub pending: Option<PendingSnapshot>,
     /// Only the publicly shared snapshot was recovered; local execution metadata is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<SnapshotIdSchema>")]
@@ -43,27 +43,23 @@ pub struct State {
     /// The pin of each claim, by claim id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pins: BTreeMap<String, PinRecord>,
+    /// Whether the shared pin record cannot yet be opened in this worktree.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub pins_locked: bool,
     /// Members: the parent's list entry this member was last produced from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member: Option<MemberState>,
 }
 
-/// The public wrapper for an authenticated, encrypted state record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ProtectedState {
-    /// Format version of the protected record.
-    pub version: u32,
-    /// Identifier of the random local key that sealed this record.
-    #[schemars(with = "SnapshotIdSchema")]
-    pub key: ObjectId,
-    /// Hex-encoded authenticated ciphertext.
-    pub ciphertext: String,
+/// A lock entry whose snapshot has yet to be restored locally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSnapshot {
+    /// Worktree state identity derived from the evidence ID and lock entry.
+    pub lock_revision: ObjectId,
     /// Optional reproducible version recoverable from its existing inputs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<ReplayState>,
     /// The public manifest of a shareable plaintext snapshot.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plain: Option<PlainSnapshot>,
 }
 

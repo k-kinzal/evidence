@@ -20,6 +20,7 @@ use crate::format::{
 use crate::history::{self, Event, PinEvent};
 use crate::journal::{self, Transaction};
 use crate::layout::Layout;
+use crate::lockfile::LockFile;
 use crate::snapshot::{ResolveError, Resolver, Version, capture, disk_snapshot, selected_hash};
 use crate::status::ANCHOR_LIMIT;
 use crate::storage_policy;
@@ -409,6 +410,16 @@ fn subject_for_pin(
     pair: &Pair,
     read_text: bool,
 ) -> std::result::Result<(Version, String), String> {
+    if pair
+        .file
+        .state
+        .as_ref()
+        .is_some_and(|state| state.pins_locked)
+    {
+        return Err(
+            "the existing shared pins are encrypted; open them before pinning again".into(),
+        );
+    }
     if pair.file.content_mode() == ContentMode::Produced {
         let adopted = pair
             .file
@@ -462,6 +473,7 @@ fn commit(
     now: Timestamp,
 ) -> Result<()> {
     let mut tx = Transaction::begin(layout, "pin")?;
+    let mut lock = LockFile::load(layout)?;
     let mut events = Vec::new();
     for p in planned {
         let current = std::fs::read_to_string(&p.pair.evid_path)
@@ -482,7 +494,7 @@ fn commit(
         }
         resolver.keep(&p.subject)?;
         let version = Some((p.subject.snapshot(), p.subject.storage()));
-        let previous = crate::protection::previous_shared(&p.text);
+        let previous = lock.shared(&p.text)?;
         let plain = if p.publish_plain {
             crate::plain::publish(layout, resolver.store, p.pair, version)?
         } else {
@@ -491,7 +503,9 @@ fn commit(
         if p.pins.is_empty() && plain.is_none() && previous.replay.is_none() {
             continue;
         }
-        let mut state = crate::protection::writable_state(layout, &p.text)
+        let mut state = lock
+            .state(layout, &p.text)
+            .and_then(crate::protection::writable)
             .map_err(|e| Error::Invalid(format!("{}: {e}", p.pair.evid_rel)))?;
         for (id, record) in &p.pins {
             state.pins.insert(id.clone(), record.clone());
@@ -502,13 +516,17 @@ fn commit(
         let replay = if plain.is_some() {
             None
         } else {
-            crate::replay::publish(layout, resolver, p.pair, &state, version)?
+            let prior = p
+                .pins
+                .is_empty()
+                .then_some(previous.replay.as_ref())
+                .flatten()
+                .map(|replay| (replay, &state));
+            crate::replay::publish(layout, resolver, p.pair, &state, version, prior)?
                 .or_else(|| p.pins.is_empty().then_some(previous.replay).flatten())
         };
         let shared = crate::protection::SharedSnapshots { replay, plain };
-        let text = crate::protection::replace_state(layout, &p.text, &state, shared)
-            .map_err(|e| Error::Invalid(format!("{}: {e}", p.pair.evid_rel)))?;
-        tx.stage_bytes(&p.pair.evid_path, text.as_bytes())?;
+        lock.stage_state(layout, &mut tx, &p.text, &state, shared)?;
         if p.pins.is_empty() {
             continue;
         }
@@ -519,6 +537,7 @@ fn commit(
         event.versions = Some(p.pins.values().flat_map(recorded_versions).collect());
         events.push((p.pair.id.clone(), event));
     }
+    lock.stage(layout, &mut tx)?;
     tx.commit()?;
     for (id, event) in events {
         history::append(layout, &id, &event)?;
@@ -617,7 +636,8 @@ mod tests {
         std::fs::write(root.join("d.md"), "# D\n\nD1\n").unwrap();
         plan_then(&layout, "d", || {}).unwrap();
         let stored = std::fs::read_to_string(&evid).unwrap();
-        assert!(stored.contains("[state.protected]"));
+        assert_eq!(stored, before);
+        assert!(layout.meta_dir().join("evidence.lock").is_file());
         let state = crate::protection::state_in(&layout, &stored).unwrap();
         assert!(state.pins.contains_key("c"));
     }

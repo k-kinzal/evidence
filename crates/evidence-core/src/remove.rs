@@ -37,6 +37,7 @@ pub(crate) fn remove(
     force: bool,
 ) -> Result<Removed> {
     let _lock = layout.lock()?;
+    crate::journal::recover(layout)?;
     let ws = Workspace::load(layout)?;
     let pairs = ws.select(layout, cwd, &[target.to_owned()])?;
     let [pair] = pairs.as_slice() else {
@@ -89,7 +90,7 @@ pub(crate) fn remove(
     // Member files whose definition could not be composed.
     for f in ws.member_files() {
         if f.parent == pair.id && !members.iter().any(|m| m.evid_path == f.evid_path) {
-            std::fs::remove_file(&f.evid_path).map_err(|e| Error::io(&f.evid_path, e))?;
+            remove_files(layout, &f.evid_path, None)?;
             files.push(layout.relative(&f.evid_path));
         }
     }
@@ -113,17 +114,13 @@ pub(crate) fn delete(
     now: jiff::Timestamp,
 ) -> Result<(Vec<String>, Option<String>)> {
     let mut files = Vec::new();
-    std::fs::remove_file(&pair.evid_path).map_err(|e| Error::io(&pair.evid_path, e))?;
     files.push(pair.evid_rel.clone());
     let kept_outside = (pair.outside_project && pair.subject_path.exists())
         .then(|| pair.subject_path.display().to_string());
-    if !keep_subject && !pair.outside_project && pair.subject_path.exists() {
-        if pair.subject_path.is_dir() {
-            std::fs::remove_dir_all(&pair.subject_path)
-        } else {
-            std::fs::remove_file(&pair.subject_path)
-        }
-        .map_err(|e| Error::io(&pair.subject_path, e))?;
+    let subject = (!keep_subject && !pair.outside_project && pair.subject_path.exists())
+        .then_some(pair.subject_path.as_path());
+    remove_files(layout, &pair.evid_path, subject)?;
+    if subject.is_some() {
         files.push(pair.subject_rel.clone());
     }
     let mut event = history::Event::new(now, "remove", "removed");
@@ -135,4 +132,17 @@ pub(crate) fn delete(
         .map(|c| c.snapshot.to_string());
     history::append(layout, &pair.id, &event)?;
     Ok((files, kept_outside))
+}
+
+fn remove_files(layout: &Layout, evid: &Path, subject: Option<&Path>) -> Result<()> {
+    let text = std::fs::read_to_string(evid).map_err(|e| Error::io(evid, e))?;
+    let mut lock = crate::lockfile::LockFile::load(layout)?;
+    let mut tx = crate::journal::Transaction::begin(layout, "remove")?;
+    lock.stage_remove(layout, &mut tx, &text)?;
+    lock.stage(layout, &mut tx)?;
+    tx.stage_delete(evid);
+    if let Some(subject) = subject {
+        tx.stage_delete(subject);
+    }
+    tx.commit()
 }

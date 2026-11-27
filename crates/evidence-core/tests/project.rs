@@ -208,6 +208,8 @@ stdout = true
     assert!(!fx.root.join("denied-result.txt").exists());
     assert!(!plain_snapshot(&fx.root, b"denied-result body").exists());
     let project = fx.project();
+    let lock: serde_json::Value =
+        serde_json::from_str(&fx.read(".evidence/evidence.lock")).unwrap();
     for (id, storage, name) in [
         ("public", Plain, "fetch"),
         ("private", Encrypted, "fetch"),
@@ -223,9 +225,9 @@ stdout = true
         );
         assert_eq!(state.runs[name].subject_storage, Some(storage), "{id}");
         let evid = fx.read(&format!("{id}.txt.evid"));
-        assert!(evid.contains("[state.protected]"), "{id}");
+        assert!(!evid.contains("[state"), "{id}");
         assert!(
-            !evid.contains("[state.protected.replay]"),
+            lock["evidence"][id]["replay"].is_null(),
             "all input bytes are publicly available: {id}"
         );
     }
@@ -245,6 +247,10 @@ stdout = true
     for file in ["public.txt.evid", "public-result.txt.evid"] {
         checkout.write(file, &fx.read(file));
     }
+    checkout.write(
+        ".evidence/evidence.lock",
+        &fx.read(".evidence/evidence.lock"),
+    );
     // A checkout needs the published chunks as well as the definition of an accepted revision.
     let error = checkout
         .project()
@@ -445,10 +451,10 @@ fn full_pipeline_update_pin_and_coverage() {
     );
     assert!(fx.read("data/high.json").contains("CVE-1"));
     assert!(!fx.read("data/high.json").contains("CVE-2"));
-    // State lives in the evidence file (and the definition is untouched).
+    // Local state is separate from the untouched evidence definition.
     let evid = fx.read("data/raw.json.evid");
     assert!(evid.starts_with("version = 2\nid = \"raw\""));
-    assert!(evid.contains("[state.protected]"));
+    assert!(!evid.contains("[state"));
     assert!(!evid.contains("snapshot = \"sha256:"));
     assert!(
         evid.contains("path = \"upstream/vulns.json\""),

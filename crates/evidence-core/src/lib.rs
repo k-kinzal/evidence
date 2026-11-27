@@ -42,6 +42,7 @@ mod history;
 mod index;
 mod journal;
 mod layout;
+mod lockfile;
 mod membership;
 mod migrate;
 mod output;

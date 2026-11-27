@@ -482,11 +482,12 @@ impl Project {
         let replay = crate::replay::verify(&self.layout)?;
         report.checked += replay.checked;
         report.corrupt.extend(replay.corrupt);
+        let lock = crate::lockfile::LockFile::load(&self.layout)?;
+        let pins = lock.verify(&self.layout)?;
+        report.checked += pins.checked;
+        report.corrupt.extend(pins.corrupt);
         let mut roots = Vec::new();
-        for pair in self.ws.pairs() {
-            let text = std::fs::read_to_string(&pair.evid_path)
-                .map_err(|e| Error::io(&pair.evid_path, e))?;
-            let shared = crate::protection::previous_shared(&text);
+        for shared in lock.shared_entries() {
             roots.extend(shared.plain);
             if let Some(replay) = shared.replay
                 && !crate::replay::contains(&self.layout, &replay)

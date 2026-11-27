@@ -33,7 +33,7 @@ pub fn evid_schema() -> serde_json::Value {
             the template for this member only.",
         "required": ["version", "member_of", "member"],
         "properties": {
-            "version": { "description": "Format version. Must be `2` (`1` before migration).", "enum": [1, 2] },
+            "version": { "description": "Format version. Must be `2`.", "const": 2 },
             "member_of": {
                 "description": "Id of the parent evidence, whose subject is the list.",
                 "type": "string",
@@ -44,7 +44,7 @@ pub fn evid_schema() -> serde_json::Value {
                 "type": "string",
                 "minLength": 1
             },
-            "state": { "$ref": "#/$defs/State" },
+            "state": false,
             "id": false,
             "subject": false,
             "members": false

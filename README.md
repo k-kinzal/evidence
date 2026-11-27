@@ -75,6 +75,20 @@ Every command accepts `--json`. The output is an envelope `{"version": 2, "<key>
 (failed runs, failed pins, blocked migrations, validation errors, denied states), `2` the
 command could not run (including usage errors such as `update --pin --force`).
 
+## Definitions and pins
+
+An `.evid` file defines the subject, productions, and claims. `evidence update --pin`
+records the versions against which each claim was confirmed in `.evidence/evidence.lock`.
+The lock also holds manifest references for shared snapshots. Add it to Git with the
+corresponding `.evid` definitions and `.evidence/objects/`.
+
+Pins of published plaintext snapshots share the versions and selection hashes needed to
+check the claim.
+Private pins share an encrypted object reference. Quoted text, run records, locators, and
+failures are kept in `.evidence/private/state/` under the project encryption setting.
+Eligible replay snapshots carry the encrypted state needed for recovery. A private pin
+without a replay snapshot can be opened with the original worktree key.
+
 ## Snapshot encryption
 
 `evidence update` and `evidence update --pin` choose how to store each new snapshot. External
@@ -98,7 +112,7 @@ With encryption enabled, `evidence update` and `evidence update --pin` make appr
 snapshots available in `.evidence/objects/plain/v2/`. Commit `.evidence` and the corresponding
 `.evid` files. An ordinary `evidence update` in a fresh checkout restores the accepted bytes,
 including directory snapshots. The receiving checkout can reuse the accepted snapshot with
-the same definition, while private execution metadata stays encrypted in the original state.
+the same definition, while private execution metadata stays encrypted in the original worktree.
 
 Shared objects use manifests and chunks of at most 4 MiB each. The logical snapshot ID
 still hashes the original file or directory. `evidence store verify` checks shared objects
@@ -127,8 +141,8 @@ For an encrypted accepted file with reproducible dependencies, an update can als
 replay manifest and encrypted chunks under `.evidence/objects/replay/v2/`. To create one,
 Evidence requires at least one recorded encrypted input or reference whose bytes have no
 local plaintext copy. Public digests identify the manifest and ciphertext chunks. The
-`.evid` state identifies the required inputs. In another
-checkout, the usual `evidence update` can reacquire those inputs via their configured
+lockfile identifies the required inputs. In another checkout, the usual `evidence update`
+can reacquire those inputs via their configured
 productions and recover the accepted file from the exact input bytes. For a time-series
 query, keep the source version or as-of time, range, and output settings in the acquisition
 definition. With an incorrect input version, the accepted artifact stays locked and the

@@ -13,10 +13,11 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::error::{Error, Result};
-use crate::format::{Diagnostic, EvidenceFile, MemberFile, Severity, document};
+use crate::format::{Diagnostic, MemberFile, Severity, State, document};
 use crate::history::{self, Event};
 use crate::journal;
 use crate::layout::Layout;
+use crate::lockfile::LockFile;
 use crate::workspace::{MemberOnDisk, Pair, Workspace};
 
 /// Options of [`migrate`].
@@ -32,9 +33,9 @@ pub struct MigrateOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MigrateAction {
-    /// Rewritten as format version 2 (or would be, in a dry run).
+    /// Rewritten as a definition with separately stored state (or would be, in a dry run).
     Migrated,
-    /// Already format version 2.
+    /// Already using the current definition format and storage layout.
     Current,
     /// Not migrated: something cannot be converted without a decision (see `issues`).
     Blocked,
@@ -61,7 +62,7 @@ pub struct MigratedFile {
     pub id: Option<String>,
     /// What happened.
     pub action: MigrateAction,
-    /// Where the version 1 file was saved.
+    /// Where the original file was saved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup: Option<String>,
     /// Problems and notes.
@@ -104,6 +105,7 @@ struct Rewrite {
     path: PathBuf,
     id: Option<String>,
     text: String,
+    state: State,
     issues: Vec<MigrateIssue>,
 }
 
@@ -181,7 +183,7 @@ pub(crate) fn migrate(
                     issues,
                 });
             }
-            Planned::Rewrite(r) => rewrites.push(r),
+            Planned::Rewrite(r) => rewrites.push(*r),
         }
     }
     for pair in ws.pairs().iter().filter(|p| ids.contains(&p.id)) {
@@ -218,7 +220,7 @@ pub(crate) fn migrate(
                 backup: None,
                 issues,
             }),
-            Planned::Rewrite(r) => rewrites.push(r),
+            Planned::Rewrite(r) => rewrites.push(*r),
         }
     }
     // A parent is written only when all of its members can be.
@@ -265,15 +267,18 @@ pub(crate) fn migrate(
             if !backup.exists() {
                 std::fs::write(&backup, &original).map_err(|e| Error::io(&backup, e))?;
             }
-            let state = document::state_in(&r.text).map_err(Error::Invalid)?;
-            let text = crate::protection::replace_state(
+            let mut lock = LockFile::load(layout)?;
+            let mut tx = journal::Transaction::begin(layout, "migrate")?;
+            tx.stage_bytes(&r.path, r.text.as_bytes())?;
+            lock.stage_state(
                 layout,
+                &mut tx,
                 &r.text,
-                &state,
+                &r.state,
                 crate::protection::SharedSnapshots::default(),
-            )
-            .map_err(Error::Invalid)?;
-            document::atomic_write(&r.path, text.as_bytes())?;
+            )?;
+            lock.stage(layout, &mut tx)?;
+            tx.commit()?;
             if let Some(id) = &r.id {
                 let mut event = Event::new(now, "migrate", "migrated");
                 event.message = Some(format!(
@@ -298,7 +303,7 @@ pub(crate) fn migrate(
 enum Planned {
     Current,
     Blocked(Vec<MigrateIssue>),
-    Rewrite(Rewrite),
+    Rewrite(Box<Rewrite>),
 }
 
 /// Plans the rewrite of a stand-alone evidence file.
@@ -321,13 +326,14 @@ fn plan_pair(pair: &Pair) -> Planned {
     let Some(file) = parsed.file else {
         return Planned::Blocked(found);
     };
-    match render(&file) {
-        Ok(text) => Planned::Rewrite(Rewrite {
+    match document::render(&file) {
+        Ok(text) => Planned::Rewrite(Box::new(Rewrite {
             path: pair.evid_path.clone(),
             id: Some(pair.id.clone()),
             text,
+            state: file.state(),
             issues: found,
-        }),
+        })),
         Err(e) => Planned::Blocked(vec![MigrateIssue {
             severity: Severity::Error,
             code: "render".into(),
@@ -411,16 +417,13 @@ fn plan_member(pair: &Pair, on_disk: &MemberOnDisk, parent: Option<&Pair>) -> Pl
         Ok(b) => b,
         Err(e) => return blocked("render", e.to_string()),
     };
-    let state = pair.file.state();
-    match document::replace_state(&format!("{header}{body}"), &state) {
-        Ok(text) => Planned::Rewrite(Rewrite {
-            path: on_disk.evid_path.clone(),
-            id: Some(pair.id.clone()),
-            text,
-            issues: found,
-        }),
-        Err(e) => blocked("render", e),
-    }
+    Planned::Rewrite(Box::new(Rewrite {
+        path: on_disk.evid_path.clone(),
+        id: Some(pair.id.clone()),
+        text: format!("{header}{body}"),
+        state: pair.file.state(),
+        issues: found,
+    }))
 }
 
 fn on_disk_diagnostics(pair: &Pair) -> Vec<Diagnostic> {
@@ -478,10 +481,4 @@ fn convert_overrides(
         .into_iter()
         .filter(|(k, v)| inherited.get(k) != Some(v))
         .collect())
-}
-
-/// Renders a version 2 evidence file with its state.
-fn render(file: &EvidenceFile) -> Result<String, String> {
-    let text = document::render(file)?;
-    document::replace_state(&text, &file.state())
 }

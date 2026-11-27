@@ -33,6 +33,8 @@ pub(crate) fn crash_point(point: &str) {
 struct Manifest {
     /// `(staged name, target)` in the order they are applied.
     entries: Vec<(String, PathBuf)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deletions: Vec<PathBuf>,
 }
 
 /// Files to adopt together.
@@ -40,6 +42,7 @@ struct Manifest {
 pub(crate) struct Transaction {
     dir: PathBuf,
     entries: Vec<(String, PathBuf)>,
+    deletions: Vec<PathBuf>,
 }
 
 impl Transaction {
@@ -55,6 +58,7 @@ impl Transaction {
         Ok(Self {
             dir,
             entries: Vec::new(),
+            deletions: Vec::new(),
         })
     }
 
@@ -80,7 +84,8 @@ impl Transaction {
     /// into place and removes the journal entry.
     pub(crate) fn commit(self) -> Result<()> {
         let manifest = Manifest {
-            entries: self.entries.clone(),
+            entries: self.entries,
+            deletions: self.deletions,
         };
         let text = serde_json::to_vec(&manifest).map_err(|e| Error::Invalid(e.to_string()))?;
         crate::format::document::atomic_write(&self.dir.join(MANIFEST), &text)?;
@@ -90,6 +95,11 @@ impl Transaction {
         crash_point("before-cleanup");
         let _ = std::fs::remove_dir_all(&self.dir);
         Ok(())
+    }
+
+    /// Removes a path when this transaction is applied.
+    pub(crate) fn stage_delete(&mut self, target: &Path) {
+        self.deletions.push(target.to_path_buf());
     }
 
     /// Abandons the transaction: nothing staged is adopted.
@@ -108,6 +118,13 @@ fn apply(dir: &Path, manifest: &Manifest) -> Result<()> {
         place(&staged, target, &dir.join(format!("{name}.previous")))?;
         if i == 0 {
             crash_point("after-first");
+        }
+    }
+    for target in &manifest.deletions {
+        match std::fs::symlink_metadata(target) {
+            Ok(_) => remove_path(target)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::io(target, e)),
         }
     }
     Ok(())
@@ -279,6 +296,7 @@ mod tests {
         t.stage_bytes(&b, b"new b").unwrap();
         let manifest = Manifest {
             entries: t.entries.clone(),
+            deletions: t.deletions.clone(),
         };
         std::fs::write(t.dir.join(MANIFEST), serde_json::to_vec(&manifest).unwrap()).unwrap();
         std::fs::write(t.dir.join(COMMITTED), b"").unwrap();
