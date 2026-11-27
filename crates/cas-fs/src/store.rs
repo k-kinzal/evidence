@@ -92,11 +92,16 @@ impl Store {
         for dir in ["blob", "tree", "tmp"] {
             fs::create_dir_all(root.join(dir)).map_err(|e| Error::io(&root, e))?;
         }
-        Ok(Self {
-            root,
+        Ok(Self::at(root))
+    }
+
+    /// References a store without creating its directories until the first write.
+    pub fn at(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
             encrypted: None,
             storage: None,
-        })
+        }
     }
 
     /// Enables authenticated reads of encrypted objects and optionally encrypts new writes.
@@ -107,14 +112,6 @@ impl Store {
         index: PathBuf,
         write: bool,
     ) -> Result<Self, Error> {
-        for kind in [ObjectKind::Blob, ObjectKind::Tree] {
-            for dir in [
-                index.join(kind.dir()),
-                self.root.join("sealed").join(kind.dir()),
-            ] {
-                fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
-            }
-        }
         self.encrypted = Some(Encrypted { key, index, write });
         Ok(self)
     }
@@ -205,6 +202,7 @@ impl Store {
             return self.put_encrypted(encrypted, ObjectKind::Blob, reader);
         }
         let tmp_dir = self.root.join("tmp");
+        fs::create_dir_all(&tmp_dir).map_err(|e| Error::io(&tmp_dir, e))?;
         let mut tmp = NamedTempFile::new_in(&tmp_dir).map_err(|e| Error::io(&tmp_dir, e))?;
         let mut hasher = Hasher::new();
         let mut buf = vec![0u8; 64 * 1024];
@@ -235,6 +233,7 @@ impl Store {
             return Ok(id);
         }
         let tmp_dir = self.root.join("tmp");
+        fs::create_dir_all(&tmp_dir).map_err(|e| Error::io(&tmp_dir, e))?;
         let mut tmp = NamedTempFile::new_in(&tmp_dir).map_err(|e| Error::io(&tmp_dir, e))?;
         tmp.write_all(&encoded)
             .map_err(|e| Error::io(tmp.path(), e))?;
@@ -249,6 +248,7 @@ impl Store {
         reader: impl Read,
     ) -> Result<ObjectId, Error> {
         let tmp_dir = self.root.join("tmp");
+        fs::create_dir_all(&tmp_dir).map_err(|e| Error::io(&tmp_dir, e))?;
         let mut tmp = NamedTempFile::new_in(&tmp_dir).map_err(|e| Error::io(&tmp_dir, e))?;
         let (id, sealed) = encrypted
             .key
@@ -263,6 +263,7 @@ impl Store {
             .map_err(|e| Error::io(tmp.path(), e))?;
         persist(tmp, &self.sealed_path(kind, &sealed))?;
         let index_dir = encrypted.index.join(kind.dir());
+        fs::create_dir_all(&index_dir).map_err(|e| Error::io(&index_dir, e))?;
         let mut reference =
             NamedTempFile::new_in(&index_dir).map_err(|e| Error::io(&index_dir, e))?;
         reference
@@ -311,6 +312,7 @@ impl Store {
             && let Some(sealed) = Self::sealed_id(encrypted, kind, id)?
         {
             let dir = self.root.join("tmp");
+            fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
             let mut file = tempfile::tempfile_in(&dir).map_err(|e| Error::io(&dir, e))?;
             self.decrypt(encrypted, kind, id, &sealed, &mut file)?;
             file.rewind().map_err(|e| Error::io(&dir, e))?;
@@ -570,7 +572,12 @@ pub(crate) fn persist(tmp: NamedTempFile, dest: &Path) -> Result<(), Error> {
 
 pub(crate) fn list_at(dir: &Path) -> Result<Vec<ObjectId>, Error> {
     let mut out = Vec::new();
-    for prefix in fs::read_dir(dir).map_err(|e| Error::io(dir, e))? {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(Error::io(dir, e)),
+    };
+    for prefix in entries {
         let prefix = prefix.map_err(|e| Error::io(dir, e))?;
         let prefix_name = prefix.file_name().to_string_lossy().into_owned();
         if prefix_name.len() != 2 || !prefix.file_type().map_err(|e| Error::io(dir, e))?.is_dir() {

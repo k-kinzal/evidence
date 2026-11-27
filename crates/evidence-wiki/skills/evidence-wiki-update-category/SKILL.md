@@ -83,7 +83,6 @@ For each article in `uncategorized`: pick one or two existing categories that fi
 ## 5. Check
 
 ```sh
-evidence validate
-evidence update --pin <each changed page id>
+evidence status
 evidence-wiki check --json     # the categories you worked on are gone from the findings
 ```

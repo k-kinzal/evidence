@@ -154,7 +154,7 @@ pub(crate) fn add(layout: &Layout, cwd: &Path, opts: &AddOptions) -> Result<Path
             }
             text.push_str(
                 "\n# Map ranges of the subject to the evidence they are based on, then pin them\n\
-                 # with `evidence update --pin <this file>`:\n\
+                 # in its evidence definition:\n\
                  # [[claims]]\n\
                  # id = \"summary\"\n\
                  # select = { heading = \"## Summary\" }   # or { lines = \"10-20\" }, { marker = \"name\" }\n\

@@ -4,7 +4,7 @@ A small content-addressed store (CAS) on the local filesystem: SHA-256 blobs and
 directory trees, with atomic writes, integrity checks, and pruning.
 
 **Role in Evidence:** stores every snapshot, so `evidence` can show what a subject looked
-like at any point (`evidence cat sha256:…`). This crate is generic. It knows nothing about
+like at any point. This crate is generic. It knows nothing about
 evidence files and can be used on its own.
 
 ## What it does

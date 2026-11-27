@@ -14,7 +14,7 @@ The wiki shows them as tables or text, but readers need pages that explain them.
 
 ```sh
 evidence-wiki check --json        # unused_sources: nothing links to or cites them
-evidence status <id>              # is the source itself fresh?
+evidence status              # is the source itself fresh?
 ```
 
 Take up to 2 sources per run (arguments override). Skip sources that are `failed` or
@@ -56,7 +56,6 @@ Take up to 2 sources per run (arguments override). Skip sources that are `failed
 ## 5. Check
 
 ```sh
-evidence validate <page id>
-evidence update --pin <page id>
+evidence status
 evidence-wiki check --json        # the source left unused_sources
 ```

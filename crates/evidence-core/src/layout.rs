@@ -12,23 +12,7 @@ use crate::error::{Error, Result};
 /// Name of the project metadata directory.
 pub(crate) const DIR: &str = ".evidence";
 
-const CONFIG_TEMPLATE: &str = r#"# Evidence project configuration (shared with the team).
-# Per-user overrides go in `config.local.toml`; personal defaults in
-# ~/.config/evidence/config.toml. Schema: schemas/config.schema.json
-
-[execution]
-# jobs = 4          # parallel updates (default: number of CPUs)
-# timeout = "10m"   # default limit per command
-
-[store]
-# encryption = true # encrypt new snapshots and managed state
-"#;
-
-const GITIGNORE: &str = "# Local, regenerable, or per-user files.
-# Uncomment to keep the entire local store, including replay objects, out of Git:
-# objects/
-";
-const LOCAL_IGNORE: &[u8] = b"/index.db\n/index.db-*\n/tmp/\n/cache/\n/private/\n/journal/\n/backup/\n/objects/tmp/\n/objects/blob/\n/objects/tree/\n/objects/sealed/\n/objects/replay/blob/\n/history/\n/lock\n/config.local.toml\n";
+const LOCAL_IGNORE: &[u8] = b"/tmp/\n/cache/\n/private/\n/journal/\n/objects/tmp/\n/objects/blob/\n/objects/tree/\n/objects/sealed/\n/objects/replay/blob/\n/history/\n/lock\n/config.local.toml\n";
 const CHUNK_ATTRIBUTES: &[u8] = b"objects/plain/v2/** binary -filter -ident\nobjects/replay/v2/** binary -filter -ident -delta\nobjects/pins/v1/** binary -filter -ident -delta\n";
 
 /// Configuration layers, lowest precedence first.
@@ -59,25 +43,14 @@ impl LoadedConfig {
 
     /// Loads configuration for a project root (or only global + env when `root` is `None`).
     pub(crate) fn load(root: Option<&Path>) -> Result<Self> {
-        let mut files = vec![(Layer::Global, global_config_path())];
-        if let Some(root) = root {
-            files.push((Layer::Project, root.join(DIR).join("config.toml")));
-            files.push((Layer::Local, root.join(DIR).join("config.local.toml")));
-        }
+        let files = Self::paths(root);
         let mut figment = Figment::from(Serialized::defaults(Config::default()));
         for (_, path) in &files {
             if path.is_file() {
                 figment = figment.merge(Toml::file_exact(path));
             }
         }
-        let sections = [
-            "user",
-            "execution",
-            "store",
-            "discovery",
-            "index",
-            "coverage",
-        ];
+        let sections = ["user", "execution", "store", "discovery", "coverage"];
         figment = figment.merge(Env::prefixed("EVIDENCE_").split("__").filter(move |k| {
             let first = k
                 .as_str()
@@ -95,6 +68,24 @@ impl LoadedConfig {
             figment,
             files,
         })
+    }
+
+    fn paths(root: Option<&Path>) -> Vec<(Layer, PathBuf)> {
+        let mut files = vec![(Layer::Global, global_config_path())];
+        if let Some(root) = root {
+            files.push((Layer::Project, root.join(DIR).join("config.toml")));
+            files.push((Layer::Local, root.join(DIR).join("config.local.toml")));
+        }
+        files
+    }
+
+    fn defaults(root: &Path) -> Self {
+        let config = Config::default();
+        Self {
+            figment: Figment::from(Serialized::defaults(&config)),
+            config,
+            files: Self::paths(Some(root)),
+        }
     }
 
     /// Sets `key` to `value` in the file of `layer`, preserving its formatting, and returns
@@ -255,49 +246,63 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
-    /// Finds the project containing `start` (searching parent directories).
-    pub(crate) fn discover(start: &Path) -> Result<Self> {
-        let start = fs::canonicalize(start).map_err(|e| Error::io(start, e))?;
-        let mut dir = Some(start.as_path());
-        while let Some(d) = dir {
-            if d.join(DIR).is_dir() {
-                return Self::open(d);
-            }
-            dir = d.parent();
-        }
-        Err(Error::NoProject(start))
+    /// Finds the project root containing `start`.
+    pub(crate) fn discover(start: &Path) -> Result<PathBuf> {
+        start
+            .ancestors()
+            .find(|dir| dir.join(DIR).is_dir())
+            .map(Path::to_path_buf)
+            .ok_or_else(|| Error::NoProject(start.to_path_buf()))
     }
 
     /// Opens the project rooted at `root`.
     pub(crate) fn open(root: &Path) -> Result<Self> {
         let root = fs::canonicalize(root).map_err(|e| Error::io(root, e))?;
+        let config = LoadedConfig::load(Some(&root))?;
+        Self::with_config(root, config)
+    }
+
+    pub(crate) fn with_defaults(root: &Path) -> Result<Self> {
+        Self::with_config(root.to_path_buf(), LoadedConfig::defaults(root))
+    }
+
+    fn with_config(root: PathBuf, config: LoadedConfig) -> Result<Self> {
         if !root.join(DIR).is_dir() {
             return Err(Error::NoProject(root));
         }
-        crate::protection::ignore_local(&root.join(DIR), LOCAL_IGNORE)?;
-        crate::protection::ensure_rules(&root.join(DIR).join(".gitattributes"), CHUNK_ATTRIBUTES)?;
-        let config = LoadedConfig::load(Some(&root))?;
-        let key = crate::protection::project_key(
-            &root.join(DIR),
-            config.config.store.encryption_enabled(),
-        )?;
+        let key = crate::protection::project_key(&root.join(DIR), false)?;
         Ok(Self { root, config, key })
     }
 
     /// Creates `.evidence/` in `root`.
-    pub(crate) fn init(root: &Path) -> Result<Self> {
+    pub(crate) fn create(root: &Path) -> Result<PathBuf> {
+        let root = fs::canonicalize(root).map_err(|e| Error::io(root, e))?;
         let dir = root.join(DIR);
-        if dir.is_dir() {
-            return Err(Error::AlreadyInitialized(root.to_path_buf()));
+        match fs::create_dir(&dir) {
+            Ok(()) => Ok(root),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {
+                Err(Error::AlreadyInitialized(root))
+            }
+            Err(e) => Err(Error::io(dir, e)),
         }
-        for sub in ["objects", "history"] {
-            fs::create_dir_all(dir.join(sub)).map_err(|e| Error::io(dir.join(sub), e))?;
+    }
+
+    /// Prepares Git rules and the local key under the caller's project lock.
+    pub(crate) fn writable(&self) -> Result<Self> {
+        let meta = self.meta_dir();
+        crate::protection::ignore_local(&meta, LOCAL_IGNORE)?;
+        crate::protection::ensure_rules(&meta.join(".gitattributes"), CHUNK_ATTRIBUTES)?;
+        if self.config.config.store.path.is_some() {
+            let root = self.store_dir();
+            fs::create_dir_all(&root).map_err(|e| Error::io(&root, e))?;
+            crate::protection::ignore_local(&root, b"/blob/\n/tree/\n/sealed/\n/tmp/\n")?;
         }
-        fs::write(dir.join("config.toml"), CONFIG_TEMPLATE)
-            .map_err(|e| Error::io(dir.join("config.toml"), e))?;
-        fs::write(dir.join(".gitignore"), GITIGNORE)
-            .map_err(|e| Error::io(dir.join(".gitignore"), e))?;
-        Self::open(root)
+        let key =
+            crate::protection::project_key(&meta, self.config.config.store.encryption_enabled())?;
+        Ok(Self {
+            key,
+            ..self.clone()
+        })
     }
 
     /// Project root (canonical).
@@ -326,10 +331,13 @@ impl Layout {
     /// Opens the object store.
     pub(crate) fn store(&self) -> Result<cas_fs::Store> {
         let root = self.store_dir();
-        let store = cas_fs::Store::open(&root)?;
-        crate::protection::ignore_local(&root, b"/blob/\n/tree/\n/sealed/\n/tmp/\n")?;
+        let store = cas_fs::Store::at(&root);
         if let Some(key) = &self.key {
-            let canonical = fs::canonicalize(&root).map_err(|e| Error::io(&root, e))?;
+            let canonical = match fs::canonicalize(&root) {
+                Ok(path) => path,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => root,
+                Err(error) => return Err(Error::io(root, error)),
+            };
             let store_identity = canonical.strip_prefix(&self.root).unwrap_or(&canonical);
             let namespace =
                 cas_fs::ObjectId::of(store_identity.as_os_str().as_encoded_bytes()).to_hex();
@@ -360,12 +368,6 @@ impl Layout {
     /// Temporary directory for runs.
     pub(crate) fn tmp_dir(&self) -> PathBuf {
         self.meta_dir().join("tmp")
-    }
-
-    /// Path of the optional SQLite index.
-    #[cfg(feature = "index")]
-    pub(crate) fn index_path(&self) -> PathBuf {
-        self.meta_dir().join("index.db")
     }
 
     /// Path relative to the root, with `/` separators.

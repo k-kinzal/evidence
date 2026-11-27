@@ -1,5 +1,5 @@
 ---
-source: crates/evidence-cli/tests/cli.rs
+source: crates/evidence-assess/tests/coverage.rs
 expression: "p.stdout(&[\"coverage\", \"report\", \"--lines\"])"
 ---
 report.md sha256:000c2a7080c4  75.0% backed (75.0% by matched claims, rest primary); without broad claims 75.0% (75.0%)

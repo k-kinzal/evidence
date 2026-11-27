@@ -737,8 +737,8 @@ pub(crate) fn collect_uses(ws: &Workspace, from: Option<&[&Pair]>) -> Vec<Use> {
                     path: r.path().map(|p| p.trim_matches('/').to_owned()),
                     selector: r.selector().cloned(),
                     revision: match r.version() {
-                        crate::format::RefVersion::Revision(Some(v)) => Some(v),
-                        _ => None,
+                        crate::format::RefVersion::Revision(v) => Some(v),
+                        crate::format::RefVersion::Current => None,
                     },
                     health: eval.status.health,
                     claim: format!("{}#{}", other.id, claim.id),

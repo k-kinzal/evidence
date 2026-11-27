@@ -289,8 +289,7 @@ pub(crate) fn restore_available(
     let lock = crate::lockfile::LockFile::load(layout)?;
     let mut recovered = Vec::new();
     for pair in ws.pairs() {
-        if pair.legacy
-            || only.is_some_and(|scope| !scope.contains(&pair.id))
+        if only.is_some_and(|scope| !scope.contains(&pair.id))
             || !replay::safe_subject(layout.root(), &pair.subject_path)
         {
             continue;

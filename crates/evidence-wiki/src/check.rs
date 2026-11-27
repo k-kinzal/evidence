@@ -390,7 +390,7 @@ fn actions(r: &Report) -> Vec<Action> {
         "problems",
         "evidence-wiki",
         r.problems.len(),
-        "evidence files that cannot be read; fix them by hand first (`evidence validate`)",
+        "evidence files that cannot be read; fix them by hand first (`evidence status`)",
     );
     add(
         "stale",

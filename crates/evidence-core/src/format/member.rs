@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 
 use crate::format::diagnostic::Diagnostic;
 use crate::format::document::{EVID_SUFFIX, valid_id};
-use crate::format::evid::{EvidenceFile, Format};
+use crate::format::evid::{EvidenceFile, FORMAT_VERSION, Format};
 use crate::format::state::{MemberState, State};
 
 /// `[members]` of a parent evidence file.
@@ -44,7 +44,7 @@ pub struct Members {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OnRemoved {
-    /// Keep it and report `member-removed` until it is removed with `evidence remove`.
+    /// Keep it and report `member-removed` until its definition is removed.
     Keep,
     /// Delete it, unless other evidence depends on it (then keep it and report it).
     Delete,
@@ -68,7 +68,6 @@ pub struct MemberFile {
     pub overrides: Map<String, Value>,
     /// Tool-managed state loaded separately from the definition.
     pub state: Option<State>,
-    legacy_state: Option<Value>,
 }
 
 impl MemberFile {
@@ -82,7 +81,7 @@ impl MemberFile {
             Diagnostic::error(code, msg).at_pointer(ptr)
         };
         let version = obj.get("version").and_then(Value::as_u64);
-        if !matches!(version, Some(1 | 2)) {
+        if version != Some(u64::from(FORMAT_VERSION)) {
             errors.push(err(
                 "version",
                 "a member evidence file needs `version = 2`".into(),
@@ -113,7 +112,7 @@ impl MemberFile {
             if MEMBER_FIELDS.contains(&k.as_str()) {
                 continue;
             }
-            if RESERVED.contains(&k.as_str()) || (k == "kind" && version == Some(1)) {
+            if RESERVED.contains(&k.as_str()) {
                 errors.push(err(
                     "member",
                     format!("`{k}` of a member comes from its parent's `[members]`"),
@@ -123,8 +122,7 @@ impl MemberFile {
             }
             overrides.insert(k.clone(), v.clone());
         }
-        let legacy_state = obj.get("state").cloned();
-        if version == Some(2) && legacy_state.is_some() {
+        if obj.contains_key("state") {
             errors.push(err(
                 "schema",
                 "`state` is stored separately from evidence definitions".into(),
@@ -133,12 +131,11 @@ impl MemberFile {
         }
         Some(if errors.is_empty() {
             Ok(Self {
-                version: u32::try_from(version.unwrap_or(2)).unwrap_or(2),
+                version: FORMAT_VERSION,
                 member_of,
                 member,
                 overrides,
                 state: None,
-                legacy_state,
             })
         } else {
             Err(errors)
@@ -146,15 +143,7 @@ impl MemberFile {
     }
 
     pub(crate) fn recorded_entry(&self) -> Option<MemberState> {
-        self.state
-            .as_ref()
-            .and_then(|state| state.member.clone())
-            .or_else(|| {
-                self.legacy_state
-                    .as_ref()
-                    .and_then(|state| state.get("member"))
-                    .and_then(|entry| serde_json::from_value(entry.clone()).ok())
-            })
+        self.state.as_ref().and_then(|state| state.member.clone())
     }
 
     /// Text of a new member evidence file.
@@ -372,31 +361,20 @@ impl Members {
     /// The definition of a member: the template merged with the member's overrides, with
     /// `{member.FIELD}` replaced, plus id and version. Returns the
     /// definition as JSON, ready for schema validation.
-    /// `version` is the parent's format version (version 1 templates default `kind` to
-    /// `source`).
     pub(crate) fn compose(
         &self,
         member: &MemberFile,
         fields: &BTreeMap<String, String>,
-        version: u32,
     ) -> Result<Value, String> {
         let mut doc = self.template.clone();
         merge(&mut doc, &member.overrides);
-        if version == 1 {
-            doc.entry("kind").or_insert_with(|| "source".into());
-        }
         let mut doc = Value::Object(doc);
         expand(&mut doc, fields, false)?;
         let Value::Object(mut doc) = doc else {
             return Err("internal: template is not a table".into());
         };
-        doc.insert("version".into(), version.into());
+        doc.insert("version".into(), FORMAT_VERSION.into());
         doc.insert("id".into(), self.member_id(fields)?.into());
-        if version == 1
-            && let Some(state) = &member.legacy_state
-        {
-            doc.insert("state".into(), state.clone());
-        }
         Ok(Value::Object(doc))
     }
 }
@@ -414,7 +392,7 @@ fn merge(template: &mut Map<String, Value>, over: &Map<String, Value>) {
 }
 
 /// Command tables: their strings are expanded again when a command runs.
-const COMMAND_TABLES: &[&str] = &["productions", "source", "transform", "generator", "verify"];
+const COMMAND_TABLES: &[&str] = &["productions", "verify"];
 
 fn expand(
     value: &mut Value,
@@ -445,43 +423,21 @@ fn expand(
     Ok(())
 }
 
-/// Composes a member definition and checks it like any evidence file. `version` is the
-/// parent's format version: a version 1 member is composed by the version 1 rules and
-/// converted in memory (with a `legacy-format` warning).
+/// Composes a member definition and validates it like any evidence file.
 pub(crate) fn compose_file(
     members: &Members,
     member: &MemberFile,
     fields: &BTreeMap<String, String>,
-    version: u32,
 ) -> (Option<EvidenceFile>, Vec<Diagnostic>) {
-    let doc = match members.compose(member, fields, version) {
+    let doc = match members.compose(member, fields) {
         Ok(doc) => doc,
         Err(e) => return (None, vec![Diagnostic::error("members", e)]),
     };
-    if version != 1 {
-        let (mut file, mut diagnostics) = crate::format::document::from_json(&doc);
-        if let Some(file) = file.as_mut() {
-            file.state.clone_from(&member.state);
-        }
-        if member.version == 1 {
-            diagnostics.push(Diagnostic::warning(
-                "legacy-format",
-                "format version 1: read-only until migrated with `evidence migrate`",
-            ));
-        }
-        return (file, diagnostics);
+    let (mut file, diagnostics) = crate::format::document::from_json(&doc);
+    if let Some(file) = &mut file {
+        file.state.clone_from(&member.state);
     }
-    let (legacy, mut diagnostics) = crate::format::v1::from_json(&doc);
-    let Some(legacy) = legacy else {
-        return (None, diagnostics);
-    };
-    let converted = crate::format::v1::to_v2(&legacy);
-    diagnostics.push(Diagnostic::warning(
-        "legacy-format",
-        "format version 1: read-only until migrated with `evidence migrate`",
-    ));
-    diagnostics.extend(converted.issues);
-    (Some(converted.file), diagnostics)
+    (file, diagnostics)
 }
 
 #[cfg(test)]

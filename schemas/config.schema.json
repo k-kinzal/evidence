@@ -51,17 +51,6 @@
       },
       "type": "object"
     },
-    "IndexConfig": {
-      "additionalProperties": false,
-      "description": "`[index]`",
-      "properties": {
-        "enabled": {
-          "description": "Maintain `.evidence/index.db` automatically after changes. Defaults to `true`\nwhen the binary is built with index support.",
-          "type": "boolean"
-        }
-      },
-      "type": "object"
-    },
     "Interval": {
       "description": "Duration such as `30m`, `6h`, `1d`, `2weeks`.",
       "pattern": "^\\s*[0-9]+\\s*[a-zA-Z]+(\\s*[0-9]+\\s*[a-zA-Z]+)*\\s*$",
@@ -113,11 +102,6 @@
       "$ref": "#/$defs/ExecutionConfig",
       "default": {},
       "description": "How runs are executed."
-    },
-    "index": {
-      "$ref": "#/$defs/IndexConfig",
-      "default": {},
-      "description": "Optional SQLite index."
     },
     "store": {
       "$ref": "#/$defs/StoreConfig",

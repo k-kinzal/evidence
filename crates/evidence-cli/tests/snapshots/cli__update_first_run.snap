@@ -4,4 +4,4 @@ expression: redact(&out)
 ---
 changed   raw/fetch  subject changed sha256:[id]  never run; run `evidence update`
 changed   high/transform  subject changed sha256:[id]  upstream `raw` changed in this run
-Affected (claims may need `evidence update --pin`): report
+Affected: report

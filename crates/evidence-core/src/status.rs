@@ -135,7 +135,7 @@ pub struct ClaimReason {
     /// Health this cause implies.
     pub health: ClaimHealth,
     /// Stable code (`unpinned`, `definition-changed`, `subject-changed`, `reference-changed`,
-    /// `legacy-unverified`, `range-unresolvable`, `unknown-evidence`, `revision-missing`, …).
+    /// `range-unresolvable`, `unknown-evidence`, `revision-missing`, …).
     pub code: &'static str,
     /// Explanation.
     pub message: String,
@@ -251,9 +251,6 @@ pub struct PairStatus {
     /// Claims (hand-written and generated).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub claims: Vec<ClaimStatus>,
-    /// The evidence file uses a legacy format (read-only until migrated).
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub legacy: bool,
 }
 
 impl PairStatus {
@@ -295,15 +292,7 @@ pub(crate) fn status(ws: &Workspace, pair: &Pair, now: Timestamp) -> PairStatus 
         snapshot: resolver.current_snapshot(pair).map(|s| s.to_string()),
         productions: Vec::new(),
         claims: Vec::new(),
-        legacy: pair.legacy,
     };
-    if pair.legacy {
-        out.notices.push(Notice {
-            code: "legacy-format",
-            detail: None,
-            message: "legacy format: run `evidence migrate` before updating or pinning".into(),
-        });
-    }
 
     for id in file.input_ids() {
         if ws.get(id).is_none() {
@@ -465,7 +454,7 @@ pub(crate) fn production_reasons(
         None => out.push(Reason::new(
             Health::Stale,
             "production-unverified",
-            "the definition of the last run is not known (migrated record)",
+            "the definition of the last run is not known",
         )),
         Some(f) if f != fp => out.push(Reason::new(
             Health::Stale,
@@ -757,7 +746,7 @@ fn evaluate_claim(
             match pin.definition {
                 None => status.push(
                     ClaimHealth::Stale,
-                    "legacy-unverified",
+                    "unverified-pin",
                     "pinned before format version 2 (definition not recorded); pin it again",
                 ),
                 Some(d) if d != fingerprint::claim(claim) => status.push(
@@ -868,7 +857,7 @@ fn current_difference(
     reference: &Reference,
     fixed: &crate::snapshot::Resolved,
 ) -> Option<Notice> {
-    let RefVersion::Revision(Some(revision)) = reference.version() else {
+    let RefVersion::Revision(revision) = reference.version() else {
         return None;
     };
     let notice = |detail, message: String| Notice {

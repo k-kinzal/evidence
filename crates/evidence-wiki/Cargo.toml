@@ -19,7 +19,7 @@ aho-corasick = "1"
 anyhow.workspace = true
 clap.workspace = true
 csv.workspace = true
-evidence-core = { workspace = true, features = ["index"] }
+evidence-core.workspace = true
 ignore.workspace = true
 jiff.workspace = true
 percent-encoding.workspace = true

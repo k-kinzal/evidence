@@ -1,12 +1,12 @@
-# assess
+# evidence-assess
 
-`assess` evaluates how well the citations of an Evidence claim support its selected
-text. Install it from the workspace with `cargo install --path crates/assess`.
+`evidence-assess` evaluates how well the citations of an Evidence claim support its selected
+text. Install it from the workspace with `cargo install --path crates/evidence-assess`.
 
 ```sh
-assess citation-correctness --provider ollama --model nimble report 'notes#release-date'
-assess citation-correctness --provider jev --jobs 8 --json reports/
-evidence show report
+evidence assess citation-correctness --provider ollama --model nimble report 'notes#release-date'
+evidence assess citation-correctness --provider jev --jobs 8 --json reports/
+cat report.md.asse
 ```
 
 Targets can be Evidence IDs, paths, or directories. Append `#claim` to select one
@@ -14,7 +14,7 @@ claim. The command uses the current subject for editable evidence, the adopted
 version for produced evidence, and the named version for fixed references. It
 resolves each selector against the captured snapshot. Only text is assessed.
 
-`assess` groups claims with identical citation text, in the same order, into one
+`evidence-assess` groups claims with identical citation text, in the same order, into one
 request with a named question per claim. The input contains separate `claims`
 and `citations` fields. Each question names its claim by index.
 `--questions-per-request` limits how many questions share a request (default 16).
@@ -38,6 +38,23 @@ individually.
 An API refusal, failed request, or missing or malformed probability distribution
 exits with code 1 after saving the outcome and any provider response. Input,
 configuration, or storage errors exit with 2.
+
+## Coverage
+
+Coverage reads the local project. It does not require a Decision API.
+
+```sh
+evidence assess coverage report --lines
+evidence assess coverage --used source --from report
+evidence assess coverage --requirements design
+evidence assess coverage --broad
+```
+
+`--used` counts the parts of a source selected by claim references. A target can be
+a pair, a directory of pairs, or a file inside a directory subject. `--requirements`
+reports which requirements claims satisfy. `--broad` finds ranges that cross the
+threshold configured in `[coverage]`. Use `--min PERCENT` with the coverage reports to
+set a threshold for exit code 1.
 
 ## Decision API adapters
 
@@ -66,9 +83,8 @@ are passed in HTTP headers and are kept out of the run archive.
 
 The assessment sidecar replaces the final `.evid` suffix with `.asse`. For example,
 `report.md.evid` has `report.md.asse`. A sidecar contains the Evidence ID, each run
-ID, claim IDs, selected versions and ranges, and results. `evidence show --json`
-exposes this data under `pair.assessments`. A run spanning several Evidence IDs
-uses the same run ID in every sidecar.
+ID, claim IDs, selected versions and ranges, and results. A run spanning several Evidence
+IDs uses the same run ID in every sidecar.
 
 The object store holds the complete run, including the original request and
 response bodies, endpoint, specified and returned model identifiers, and any
@@ -78,8 +94,7 @@ those runs. The `.asse` files themselves contain the result values and their
 references.
 
 ```sh
-evidence cat sha256:RUN_DIGEST
-assess replay report sha256:RUN_DIGEST
+evidence assess replay report sha256:RUN_DIGEST
 ```
 
 Replay resends every original request in the run with its original grouping and

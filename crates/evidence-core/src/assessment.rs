@@ -181,6 +181,7 @@ impl AssessmentFile {
 
 pub(crate) fn capture(layout: &Layout, targets: &[(String, String)]) -> Result<Vec<CapturedClaim>> {
     let _lock = layout.lock()?;
+    let layout = &layout.writable()?;
     journal::recover(layout)?;
     let ws = Workspace::load(layout)?;
     let resolver = Resolver::new(&ws);
@@ -195,12 +196,7 @@ pub(crate) fn capture(layout: &Layout, targets: &[(String, String)]) -> Result<V
             RefVersion::Current => {
                 resolver.current(pair.ok_or_else(|| Error::NotFound(evidence.to_owned()))?)
             }
-            RefVersion::Revision(Some(id)) => resolver.fixed(pair, id),
-            RefVersion::Revision(None) => {
-                return Err(Error::Invalid(format!(
-                    "{evidence}: a fixed revision is required"
-                )));
-            }
+            RefVersion::Revision(id) => resolver.fixed(pair, id),
         }
         .map_err(|e| Error::Invalid(format!("{evidence}: {e}")))?;
         let frozen = resolver.keep(&resolved)?;
@@ -302,6 +298,7 @@ pub(crate) fn record(
         ));
     }
     let _lock = layout.lock()?;
+    let layout = &layout.writable()?;
     journal::recover(layout)?;
     let ws = Workspace::load(layout)?;
     let store = ws.store();

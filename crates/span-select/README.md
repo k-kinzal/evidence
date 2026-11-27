@@ -7,7 +7,7 @@ set of ranges.
 
 - claims (`select = { heading = "## Findings" }`) and references into other evidence
   (`{ json_pointer = "/findings/12" }`) resolve with these selectors;
-- `evidence coverage` is computed with `Coverage`;
+- `evidence assess coverage` is computed with `Coverage`;
 - moved text is found again with `find_unique`.
 
 This crate is generic: it knows nothing about evidence files.

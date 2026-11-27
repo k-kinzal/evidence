@@ -11,8 +11,7 @@ or tell it to change something. What the caller never has to know:
 - how pairs are discovered and how the dependency graph is built;
 - how ids and paths resolve to pairs;
 - the clock, the project lock, and the object store layout;
-- how commands run, and how results are checked, stored, and propagated;
-- whether the SQLite index exists, and keeping it in sync.
+- how commands run, and how results are checked, stored, and propagated.
 
 ## Interface
 
@@ -40,7 +39,6 @@ for status in project.statuses() {
 }
 let notes = project.find("notes.md")?;                 // an id or a path
 assert_eq!(project.coverage(notes)?.ratio, 1.0);       // all primary
-assert!(project.search("by hand", 10).iter().any(|h| h.id == "notes"));
 # Ok(()) }
 ```
 
@@ -48,29 +46,21 @@ assert!(project.search("by hand", 10).iter().any(|h| h.id == "notes"));
 |-----|--------|
 | `pairs`, `pair`, `find`, `select`, `problems` | `update` (with `UpdateOptions`: targets, force, isolated, dry run) |
 | `status`, `statuses`, `show`, `coverage`, `requirement_coverage`, `validate` | `pin` (with `PinOptions`: targets, by, dry run) |
-| `dependencies`, `dependents`, `downstream`, `tree`, `dot` | `migrate` (format version 1 to 2), `add`, `remove` |
-| `history`, `search`, `object`, `snapshot_text` | `prune_store`, `refresh_index` |
+| `dependencies`, `dependents`, `downstream` | `add`, `remove` |
+| `history`, `object`, `snapshot_text` | `prune_store` |
 | `config`, `fingerprint` | `reload` |
 
 Methods that change files take `&mut self`. They hold the project lock while they work and
-leave the project reloaded, with the index synced. Two methods exist for reproducible results:
-`Project::at(time)` evaluates freshness at a fixed time, and `Project::scan_only()` never
-uses the index.
+leave the project reloaded. `Project::at(time)` evaluates freshness at a fixed time.
 
 The result types (`PairStatus`, `CoverageReport`, `UpdateReport`, `PinReport`, …) serialize to
 the CLI's `--json` output.
 
-The `format` module is the public API of the file formats (`docs/format-v2.md`):
+The `format` module is the public API of the file formats.
 
 - the types (`EvidenceFile`, `Production`, `Claim`, `Reference`, `State`, `Config`, …);
-- `parse`, which runs the JSON Schema and semantic checks and returns diagnostics; version 1
-  files are converted in memory and reported as `legacy-format`;
-- `replace_state`, which rewrites `[state]` while keeping the definition's comments and
-  formatting;
+- `parse`, which runs schema and semantic checks on version 2 definitions and returns diagnostics;
 - `evid_schema` and `config_schema`.
-
-The meaning of every record (content modes, references, runs, pins, generated claims) is in
-`docs/semantics.md`.
 
 ## What `update` does for one production
 
@@ -98,21 +88,14 @@ All modules are private. The public surface is what `lib.rs` re-exports.
 
 | Module | Hides |
 |--------|-------|
-| `project` | The `Project` facade: sequencing, target resolution, the clock, index use |
+| `project` | The `Project` facade: sequencing, target resolution, and the clock |
 | `layout` | The `.evidence/` layout, configuration layers with origins, the lock |
-| `workspace`, `graph` | Discovery (honors `.evidenceignore`; never enters directory subjects), typed edges (input, claim, member), the production graph and its levels |
+| `workspace` | Discovery (honors `.evidenceignore`; never enters directory subjects), typed edges (input, claim, member), the production graph and its levels |
 | `update`, `exec`, `subject_schema`, `snapshot`, `journal` | Runs: inputs, commands and placeholders, timeouts, checks, locators, snapshot ids, atomic adoption and recovery |
 | `status`, `coverage`, `pin`, `fingerprint` | Health and reasons; claim evaluation against Current and Revision references, line and requirement coverage, pins |
-| `migrate` | Explicit conversion of version 1 files, with backups and a report |
-| `history`, `search`, `index` | Append-only history; full-text search by scan or by SQLite (feature `index`) |
+| `history` | Append-only history |
 | `add`, `remove`, `store`, `validate`, `output` | Scaffolding, removal, pruning, validation, `--json` shapes |
 | `format` | The `.evid` and config formats (public) |
-
-## Features
-
-| Feature | Default | Effect |
-|---------|---------|--------|
-| `index` | off | SQLite full-text index (FTS5, trigram: substring and CJK search). `search` gives the same results without it; the CLI enables it |
 
 ## Tests
 
@@ -121,7 +104,6 @@ need a Unix-like system.
 
 - `tests/acceptance.rs`: the acceptance criteria AC 01–36 and a requirements-to-design
   scenario (`docs/traceability.md` maps tests to invariants).
-- `tests/migration.rs`: the migration criteria MG 01–06.
 - `tests/project.rs`: end-to-end behavior through `Project` only. Covers:
   - pipelines, propagation, `force` / `isolated` / dry run;
   - intervals;
@@ -132,10 +114,7 @@ need a Unix-like system.
   - members;
   - pruning;
   - locking.
-- `tests/format.rs`: parser diagnostics (insta snapshots), version 1 conversion, state
-  rewrites, and the generated schemas.
-- `tests/index.rs`: search returns the same results with and without the index, and deleting
-  the index loses nothing.
+- `tests/format.rs`: parser diagnostics and the generated schemas.
 - Unit tests next to the code, including property tests of graph planning on random DAGs
   (`src/graph_props.rs`) and journal recovery.
 

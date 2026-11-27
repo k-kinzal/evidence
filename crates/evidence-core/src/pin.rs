@@ -1,7 +1,7 @@
 //! Pins: recording the versions a claim was confirmed against (`docs/semantics.md`, 6.1).
 //!
 //! [`build`] makes one pin from versions given by the caller, so explicit pins
-//! (`evidence update --pin`) and the automatic pins of a run (from the run's captured
+//! and the automatic pins of a run (from the run's captured
 //! versions) bind the same things (INV 06). An explicit pin changes nothing but the pins it
 //! was asked for (INV 02): no adopted content, no run record, no failed attempt.
 
@@ -88,7 +88,6 @@ pub(crate) fn build(
         },
         anchor: (claimed.len() <= ANCHOR_LIMIT).then(|| claimed.to_owned()),
         evidence,
-        legacy: false,
     })
 }
 
@@ -106,7 +105,7 @@ pub(crate) fn recorded_versions(
         )
 }
 
-/// Options of [`pin`] (`evidence update --pin`).
+/// Options for explicit claim pinning.
 #[derive(Debug, Clone, Default)]
 pub struct PinOptions {
     /// Ids or paths, each optionally followed by `#<claim id>`. Required.
@@ -221,12 +220,14 @@ pub(crate) fn pin(
             "`--pin` needs targets: `<path or id>` or `<path or id>#<claim>`".into(),
         ));
     }
-    let _lock = if opts.dry_run {
-        None
+    let writable;
+    let (layout, _lock) = if opts.dry_run {
+        (layout, None)
     } else {
         let lock = layout.lock()?;
-        journal::recover(layout)?;
-        Some(lock)
+        writable = layout.writable()?;
+        journal::recover(&writable)?;
+        (&writable, Some(lock))
     };
     let ws = Workspace::load(layout)?;
     let resolver = Resolver::new(&ws);
@@ -256,13 +257,6 @@ pub(crate) fn pin(
             }
         }
     }
-    if let Some((legacy, _)) = selection.iter().find(|(p, _)| p.legacy) {
-        return Err(Error::Invalid(format!(
-            "{} uses a legacy format; run `evidence migrate` before pinning",
-            legacy.evid_rel
-        )));
-    }
-
     let mut report = PinReport {
         dry_run: opts.dry_run,
         ..PinReport::default()
@@ -604,7 +598,10 @@ mod tests {
     #[test]
     fn a_definition_changed_after_reading_is_a_conflict() {
         let dir = tempfile::tempdir().unwrap();
-        let layout = Layout::init(dir.path()).unwrap();
+        let layout = Layout::open(&Layout::create(dir.path()).unwrap())
+            .unwrap()
+            .writable()
+            .unwrap();
         let root = layout.root().to_path_buf();
         std::fs::write(root.join("req.md"), "# R\n\nR1\n").unwrap();
         std::fs::write(root.join("req.md.evid"), "version = 2\nid = \"req\"\n").unwrap();

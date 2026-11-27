@@ -1,85 +1,66 @@
 # evidence-cli
 
-The `evidence` command. You can use it in a terminal, from cron or CI, and from AI agents
-via `--json`.
-
-**Role:** a thin front end over `evidence-core`. It parses arguments with clap, makes one or
-two calls on `evidence_core::Project`, renders the result as human or JSON output, and maps it
-to an exit code. It contains no business logic, and it decides nothing about the project
-layout, the clock, locking, or the index: whatever the CLI can do, `evidence-core` can do as a
-library.
-
-## Commands
-
-Command names follow package managers (Cargo, npm, Nix).
+`evidence` tracks how subjects are produced, which claims cite them, and what needs
+attention. Install with `cargo install --path crates/evidence-cli`.
 
 | Command | Purpose |
 |---------|---------|
-| `init` | Create `.evidence/` (config, object store, history) |
-| `add <path> --kind source\|derived\|authored [--evid <path>] [-- <command>…]` | Scaffold a version 2 evidence file. `--kind` only picks a template: the command becomes a `[[productions]]` entry that writes the subject; `authored` writes an editable subject. `--evid` puts the evidence file elsewhere and records `subject` |
-| `remove` / `rm` | Remove a pair. Refuses if others depend on it, unless `--force`. Never deletes a subject outside the project |
-| `update [<target>…]` | Run productions that are due or have changed inputs (everything with `--force`, or the targets) and then those that use their results. Also `--isolated` and `--dry-run` |
-| `update --pin <target>[#<claim>]… [--by NAME] [--dry-run]` | Pin claims of explicit targets. Runs nothing; `--force` / `--isolated` with it are usage errors |
-| `migrate [<target>…] [--dry-run]` | Rewrite format version 1 files as version 2 (backups in `.evidence/backup/v1/`) |
-| `outdated [--deny <health>]` | What needs attention. With `--deny`, the exit code is 1 in CI |
-| `status` | Every pair with its health |
-| `review <target> [--claim <id>]` | Deprecated, hidden alias of `update --pin` for one transition period |
-| `validate [--strict]` | Config, evidence files, programs on `PATH`, subject schemas, claims |
-| `coverage <target> [--lines] [--min <pct>]` | Line-level coverage of any pair's current version |
-| `coverage <target> --requirements [--revision <id>]` | Which requirements of the target are satisfied by `satisfies` claims |
-| `tree [<target>] [-i] [--format text\|dot\|json]` | Dependency tree, or with `-i` everything affected by a change |
-| `why <target>` | Why a pair is due, stale, or broken |
-| `show <target>` | Definition, command, state, locator, neighbors |
-| `history <target>` | Past runs, pins, migrations |
-| `search <query> [--no-index]` | Full-text search, using the index when there is one |
-| `cat <sha256:…[:path]>` | Print a stored snapshot |
-| `store verify` / `store prune [--drop-history]` | Object store integrity and cleanup |
-| `index rebuild` / `index sync` | Maintain the optional SQLite index |
-| `config list [--show-origin]` / `get` / `set [--global\|--local]` / `path` | Layered configuration |
-| `schema evid\|config` | Print a JSON Schema |
-| `completions <shell>` | Shell completions |
+| `evidence init [PATH]` | Create the project marker `.evidence/` |
+| `evidence update [TARGET…]` | Recover interrupted updates, synchronize members, restore shared snapshots, and refresh productions in dependency order |
+| `evidence status` | Show evidence that needs attention, interrupted updates, and diagnostics for definitions and configuration |
+| `evidence graph [QUERY]` | Show the property graph of the definitions, or query it with read-only GQL |
+| `evidence config list [--show-origin]` / `get` / `set [--global\|--local]` / `path` | Work with the configuration layers |
+| `evidence <name> …` | Run `evidence-<name>` from `PATH` |
 
-Global flags:
+Update targets are IDs, subject paths, or directories of subjects. An explicit target
+runs even when current. Use `--force` to run all selected productions, `--isolated` to
+avoid updating dependents, `--dry-run` to see a plan, or `--jobs` to set parallelism.
 
-| Flag | Effect |
-|------|--------|
-| `-C <dir>` | Run in another directory |
-| `--json` | Machine-readable output |
-| `--color auto\|always\|never` | Color control |
-| `-v` | Verbose logging (also `EVIDENCE_LOG=debug`) |
+`-C DIR` sets the working directory, including for extensions. Arguments after an
+extension name belong to the extension. The built-ins also accept `--json`,
+`--color auto|always|never`, and `-v` for logging (`EVIDENCE_LOG` works too).
 
-Targets may be ids or paths. A directory path selects every pair under it.
+The built-ins use exit code `2` when a command cannot run and `1` for failed updates
+or missing configuration keys queried with `config get`. A completed `status` inspection
+exits with `0` and reports issues in its output. Its JSON result is
+`{"version": 2, "status": {"pairs": [], "diagnostics": [], "pending_adoptions": 0}}`
+when everything is current. Each pair listed has a health other than `ok`.
 
-## Contracts
+## Graph queries
 
-- **JSON output:** `--json` prints `{"version": 2, "<key>": …}` (keys in
-  [docs/cli.md](../../docs/cli.md#json-output)).
-- **Exit codes:**
-  - `0`: OK.
-  - `1`: the command ran and found problems: failed runs, failed or conflicting pins,
-    blocked migrations, validation errors, `--deny`, or `coverage --min`.
-  - `2`: the command could not run (usage, I/O, or configuration errors, or writing a
-    version 1 file before `migrate`). With `--json`, errors are JSON too.
+```sh
+evidence graph
+evidence graph "MATCH (e:Evidence) WHERE e.id = 'report'"
+evidence graph "MATCH p = (:Evidence {id: 'report'})-[:HAS_CLAIM]->(:Claim)-[:CITES]->(:Evidence) RETURN p"
+evidence graph "MATCH (e:Evidence) RETURN e.id AS id ORDER BY id"
+```
 
-  The full reference is [docs/cli.md](../../docs/cli.md).
+- `Evidence` nodes expose the definition fields, the `.evid` path (`evid`), the resolved
+  subject path (`resolved_subject`), and its content mode (`content`).
+- `HAS_PRODUCTION`, `HAS_CLAIM`, and `HAS_REQUIREMENT` connect evidence to its declarations.
+  `INPUT` connects a production to an evidence node. `CITES` connects a claim to its source.
+  Reference edges carry the declared fields such as `ref`, `select`, and `revision`.
+  A missing target has the label `Unresolved`.
+- `MEMBER_OF` connects a member to the parent list and carries the member's `key`.
+  Snapshots and history live outside the graph.
 
-## Features
+The full graph and matched subgraphs render as Graphviz DOT. A `MATCH` without
+`RETURN` includes the matched paths. A `RETURN` with nodes, edges, or paths includes
+those elements in the subgraph. Scalar-only projections render as tab-separated columns.
+Use `--json` for the `graph.nodes`, `graph.edges`, and `graph.result` fields.
 
-| Feature | Default | Effect |
-|---------|---------|--------|
-| `index` | on | Enables `evidence-core/index`: an SQLite full-text index for faster search. Without it, search scans the files and gives the same results |
+Queries run in memory using the read-only query grammar implemented by
+[froGQL](https://github.com/pleiad/frogql/blob/main/docs/query-language.md).
 
-## Tests
+## Shell completion
 
-`tests/cli.rs` runs the binary on temporary projects (Unix: the evidence files run `cp` and
-`jq`). It checks:
+Install the extension with `cargo install --path crates/evidence-completions`.
 
-- exit codes, including `update --pin` rules and the deprecated `review` alias;
-- recovery from a process stopped during adoption (`EVIDENCE_TEST_CRASH_AT`);
-- `migrate`;
-- config layers and their origins;
-- search with and without the index;
-- insta snapshots of human output;
-- every `--json` output is a version 2 envelope with the expected key.
+- Bash: `source <(evidence completions bash)`
+- Zsh: write `evidence completions zsh` to `_evidence` in a directory on `fpath`, then run `compinit`.
+- Fish: write `evidence completions fish` to `~/.config/fish/completions/evidence.fish`.
 
-License: MIT OR Apache-2.0.
+The scripts ask the core for the current commands with `evidence --list-cmds` and options
+with `evidence <command> --completion-helper`. To complete an extension's arguments,
+provide a shell function named `_evidence_<name>`. Bash hooks populate `COMPREPLY`, Zsh
+hooks use `compadd`, and Fish hooks emit one candidate per line.

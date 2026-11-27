@@ -2,8 +2,7 @@
 
 use std::io::{IsTerminal, Write};
 
-use evidence_core::{ClaimHealth, Health};
-use evidence_core::{LineStatus, UsageStatus};
+use evidence_core::Health;
 use serde::Serialize;
 
 use crate::cli::ColorChoice;
@@ -18,7 +17,6 @@ pub(crate) enum Style {
     Yellow,
     Red,
     Cyan,
-    Magenta,
 }
 
 impl Style {
@@ -30,7 +28,6 @@ impl Style {
             Self::Yellow => "33",
             Self::Red => "31",
             Self::Cyan => "36",
-            Self::Magenta => "35",
         }
     }
 }
@@ -68,38 +65,6 @@ impl Out {
             Health::Failed | Health::Missing | Health::Broken => Style::Red,
         };
         self.paint(format!("{:<8}", h.as_str()), style)
-    }
-
-    pub(crate) fn claim(self, h: ClaimHealth) -> String {
-        let style = match h {
-            ClaimHealth::Matched => Style::Green,
-            ClaimHealth::Stale => Style::Yellow,
-            ClaimHealth::Broken => Style::Red,
-        };
-        self.paint(format!("{:<8}", h.as_str()), style)
-    }
-
-    pub(crate) fn line_status(self, s: LineStatus) -> String {
-        let style = match s {
-            LineStatus::Matched => Style::Green,
-            LineStatus::Primary => Style::Cyan,
-            LineStatus::Stale => Style::Yellow,
-            LineStatus::Broken => Style::Red,
-            LineStatus::Uncovered => Style::Magenta,
-            LineStatus::Excluded => Style::Dim,
-        };
-        self.paint(format!("{:<9}", s.as_str()), style)
-    }
-
-    pub(crate) fn usage_status(self, s: UsageStatus) -> String {
-        let style = match s {
-            UsageStatus::Matched => Style::Green,
-            UsageStatus::Stale => Style::Yellow,
-            UsageStatus::Broken => Style::Red,
-            UsageStatus::Unused => Style::Magenta,
-            UsageStatus::Excluded => Style::Dim,
-        };
-        self.paint(format!("{:<9}", s.as_str()), style)
     }
 
     /// Prints `{"version": 2, "<key>": value}`.

@@ -37,6 +37,7 @@ pub(crate) fn remove(
     force: bool,
 ) -> Result<Removed> {
     let _lock = layout.lock()?;
+    let layout = &layout.writable()?;
     crate::journal::recover(layout)?;
     let ws = Workspace::load(layout)?;
     let pairs = ws.select(layout, cwd, &[target.to_owned()])?;

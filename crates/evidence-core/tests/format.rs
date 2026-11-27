@@ -22,7 +22,6 @@ fn parses_every_shape() {
             "{name}: {:?}",
             parsed.diagnostics
         );
-        assert!(parsed.legacy.is_none());
         assert_eq!(parsed.file.unwrap().content_mode(), mode, "{name}");
     }
 }
@@ -44,7 +43,7 @@ fn claims_references_and_inputs() {
     assert_eq!(claim.select, Selector::Lines("40-58".parse().unwrap()));
     assert!(matches!(
         claim.evidence[0].version(),
-        RefVersion::Revision(Some(_))
+        RefVersion::Revision(_)
     ));
     assert!(
         claim.evidence[0]
@@ -68,25 +67,22 @@ fn claims_references_and_inputs() {
 }
 
 #[test]
-fn version_1_files_are_read_and_converted() {
-    for name in ["source.json.evid", "derived.json.evid", "authored.md.evid"] {
-        let parsed = parse(&fixture(&format!("v1/{name}")), Path::new(name));
-        assert!(parsed.legacy.is_some(), "{name}");
+fn version_1_definitions_and_members_are_rejected() {
+    for text in [
+        fixture("v1/authored.md.evid"),
+        "version = 1\nmember_of = \"list\"\nmember = \"entry\"\n".to_owned(),
+    ] {
+        let parsed = parse(&text, Path::new("subject.evid"));
+        assert!(parsed.file.is_none() && parsed.member.is_none());
         assert!(
-            parsed.diagnostics.iter().any(|d| d.code == "legacy-format"),
-            "{name}: {:?}",
+            parsed
+                .diagnostics
+                .iter()
+                .any(|d| d.pointer.as_deref() == Some("/version")),
+            "{:?}",
             parsed.diagnostics
         );
-        assert_eq!(parsed.file.unwrap().version, 2);
     }
-    // `lifecycle = "snapshot"` without pins: the revision is unknown and blocks migration.
-    let parsed = parse(&fixture("v1/authored.md.evid"), Path::new("a"));
-    assert!(
-        parsed
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "revision-unknown")
-    );
 }
 
 #[test]
@@ -147,7 +143,9 @@ fn version_two_definitions_reject_embedded_state() {
         "version = 2\nid = \"source\"\n",
         "version = 2\nmember_of = \"list\"\nmember = \"entry\"\n",
     ] {
-        let text = format!("{definition}\n[state]\n");
+        let text = format!(
+            "{definition}\n# ---- Managed by `evidence`. Do not edit below this line. ----\n[state]\n"
+        );
         let parsed = parse(&text, Path::new("subject.evid"));
         assert!(
             parsed.file.is_none() && parsed.member.is_none(),

@@ -143,13 +143,13 @@ pub struct ContentRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RunRecord {
-    /// Run id (absent for records migrated from format version 1).
+    /// Run id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
     /// When the run finished (the last successful check, even if nothing changed).
     #[schemars(with = "TimestampSchema")]
     pub at: Timestamp,
-    /// Fingerprint of the production definition the run used (absent for migrated records).
+    /// Fingerprint of the production definition the run used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<SnapshotIdSchema>")]
     pub fingerprint: Option<ObjectId>,
@@ -175,9 +175,6 @@ pub struct RunRecord {
     /// Where the content came from (the evaluated `locator` table).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub locator: BTreeMap<String, String>,
-    /// Migrated from format version 1: the definition used is not known.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub legacy: bool,
 }
 
 /// The version of an input used by a run.
@@ -228,7 +225,7 @@ pub struct PinRecord {
     /// The run that recorded it (automatic pins).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
-    /// Fingerprint of the normalized claim definition (absent for migrated pins).
+    /// Fingerprint of the normalized claim definition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<SnapshotIdSchema>")]
     pub definition: Option<ObjectId>,
@@ -243,16 +240,13 @@ pub struct PinRecord {
     /// The version of each reference.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<PinnedReference>,
-    /// Migrated from format version 1: needs a new pin.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub legacy: bool,
 }
 
 /// The subject side of a pin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedContent {
-    /// Snapshot of the subject (absent for some migrated pins).
+    /// Snapshot of the subject.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<SnapshotIdSchema>")]
     pub snapshot: Option<ObjectId>,

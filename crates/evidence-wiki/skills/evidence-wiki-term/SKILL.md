@@ -61,13 +61,11 @@ An **SBOM** (software bill of materials) is … (one-paragraph definition).
 
 ## 3. Link the pages that use it
 
-On each page in `examples`, link the first mention: `[[SBOM]]`. Then
-`evidence update --pin <page>`.
+On each page in `examples`, link the first mention: `[[SBOM]]`.
 
 ## 4. Check
 
 ```sh
-evidence validate
-evidence update --pin terms.<slug>
+evidence status
 evidence-wiki check --json     # the term left term_candidates
 ```

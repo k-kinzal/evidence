@@ -152,7 +152,7 @@ pub struct RunReport {
 pub struct Skipped {
     /// Evidence id.
     pub id: String,
-    /// Stable code: `nothing-to-run`, `legacy-format`, `locked-snapshot`.
+    /// Stable code: `nothing-to-run`, `locked-snapshot`.
     pub code: String,
     /// Explanation.
     pub message: String,
@@ -208,12 +208,14 @@ pub(crate) fn update(
     now: Timestamp,
     opts: &UpdateOptions,
 ) -> Result<UpdateReport> {
-    let _lock = if opts.dry_run {
-        None
+    let writable;
+    let (layout, _lock) = if opts.dry_run {
+        (layout, None)
     } else {
         let lock = layout.lock()?;
-        journal::recover(layout)?;
-        Some(lock)
+        writable = layout.writable()?;
+        journal::recover(&writable)?;
+        (&writable, Some(lock))
     };
     let mut ws = Workspace::load(layout)?;
     let mut report = UpdateReport {
@@ -223,9 +225,6 @@ pub(crate) fn update(
     let explicit = !opts.targets.is_empty();
     let selected: HashSet<String> = if explicit {
         let pairs = ws.select(layout, cwd, &opts.targets)?;
-        if let Some(legacy) = pairs.iter().find(|p| p.legacy) {
-            return Err(Error::Legacy(legacy.evid_rel.clone()));
-        }
         for p in pairs
             .iter()
             .filter(|p| p.file.productions.is_empty() && !locked(p))
@@ -234,24 +233,14 @@ pub(crate) fn update(
                 id: p.id.clone(),
                 code: "nothing-to-run".into(),
                 message: format!(
-                    "nothing to run: `{}` has no productions (its subject is editable; pin its \
-                     claims with `evidence update --pin {}`)",
-                    p.id, p.id
+                    "nothing to run: `{}` has no productions (its editable \
+                     subject is maintained separately)",
+                    p.id
                 ),
             });
         }
         pairs.into_iter().map(|p| p.id.clone()).collect()
     } else {
-        for p in ws.pairs().iter().filter(|p| p.legacy) {
-            report.skipped.push(Skipped {
-                id: p.id.clone(),
-                code: "legacy-format".into(),
-                message: format!(
-                    "{} uses a legacy format; run `evidence migrate` first",
-                    p.evid_rel
-                ),
-            });
-        }
         ws.pairs().iter().map(|p| p.id.clone()).collect()
     };
 
@@ -260,7 +249,7 @@ pub(crate) fn update(
         let parents: Vec<String> = ws
             .pairs()
             .iter()
-            .filter(|p| p.file.members.is_some() && !p.legacy)
+            .filter(|p| p.file.members.is_some())
             .map(|p| p.id.clone())
             .collect();
         if sync_members(layout, &ws, &parents, now, &mut report) {
@@ -319,9 +308,6 @@ pub(crate) fn update(
             let Some(pair) = ws.get(&node.pair) else {
                 continue;
             };
-            if pair.legacy {
-                continue;
-            }
             if locked(pair) {
                 continue;
             }
@@ -419,7 +405,7 @@ pub(crate) fn update(
     for pair in ws
         .pairs()
         .iter()
-        .filter(|p| selected.contains(&p.id) && locked(p))
+        .filter(|p| (!explicit || selected.contains(&p.id)) && locked(p))
     {
         let shared_plain = pair
             .file
@@ -1358,7 +1344,6 @@ fn adopt_staged(
                 .map(|cs| cs.iter().map(|c| c.id.clone()).collect()),
             namespace: production.namespace.clone(),
             locator: staged.locator.clone(),
-            legacy: false,
         },
     );
     state.failures.remove(&production.name);

@@ -17,14 +17,14 @@ wiki skill follows it.
 
 ```sh
 evidence-wiki check --json        # the maintenance report (actions first)
-evidence validate                 # evidence files must be readable
+evidence status                 # evidence files must be readable
 ```
 
 `actions` lists findings most important first, each with the skill that handles it:
 
 | finding | skill |
 |---------|-------|
-| `problems` | fix by hand here: an evidence file does not parse (`evidence validate` says why) |
+| `problems` | fix by hand here: an evidence file does not parse (`evidence status` says why) |
 | `stale` | `/evidence-wiki-refresh` — sources changed or claims are unpinned |
 | `unpaired` | `/evidence-wiki-page` — a Markdown file without an evidence file |
 | `wanted_pages` | `/evidence-wiki-page` — links to pages that do not exist |
@@ -52,24 +52,24 @@ for a person (mention it in the summary) rather than invented.
 ## 3. Do each task with its skill
 
 Invoke the skill (for example `/evidence-wiki-update-category`) with the items as arguments,
-or follow its SKILL.md directly if skills cannot be invoked. Each skill ends by running
-`evidence validate` and pinning what it wrote.
+or follow its SKILL.md directly if skills cannot be invoked. Each skill checks its edits
+with `evidence status`.
 
 ## 4. Verify and report
 
 ```sh
-evidence validate
+evidence status
 evidence-wiki check --json        # compare with step 1
 ```
 
-The run is done when validation passes and the findings you worked on went down. Finish
+Check that your edits clear the findings you addressed and review any remaining diagnostics. Finish
 with a short summary: what changed (page ids), what is left, and anything that needs a
 person (missing sources, contradictions between sources, ambiguous names you could not
 settle). Never end with a half-written page: finish it or remove your new files.
 
 ## Rules
 
-- Never edit `[state]` in evidence files; only `evidence update --pin` records pins.
+- Keep evidence files declarative. Evidence stores execution state under `.evidence/`.
 - Never delete a page someone wrote. To retire one, set `hidden = true` in its `[wiki]`
   and add its name as an alias of the page that replaces it.
 - Do not run `evidence update` without targets in a scheduled run unless the project's

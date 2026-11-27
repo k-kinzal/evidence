@@ -1,5 +1,6 @@
 ---
 source: crates/evidence-core/tests/format.rs
+assertion_line: 241
 expression: out
 ---
 ## schema.json.evid
@@ -21,7 +22,5 @@ error[action-field] command.json.evid:11 (/verify/stdout): `stdout` is not allow
 error[namespace] namespaces.json.evid:11 (/productions/1/namespace): namespace `gen.sub` overlaps `gen` of production `a`
 error[namespace] namespaces.json.evid:14 (/claims/0/id): claim `gen.mine` lies in namespace `gen` of production `a`; hand-written claims must use other ids
 ## legacy.json.evid
-error[kind-field] legacy.json.evid: kind `derived` requires a `[transform]` table
-error[kind-field] legacy.json.evid: kind `derived` requires at least one input
-error[kind-field] legacy.json.evid:4 (/source): `source` is not allowed for kind `derived`
-warning[legacy-format] legacy.json.evid (/version): format version 1: read-only until migrated with `evidence migrate`
+error[schema] legacy.json.evid:1 (/version): 2 was expected
+error[schema] legacy.json.evid: Additional properties are not allowed ('kind', 'source' were unexpected)

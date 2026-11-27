@@ -1,4 +1,5 @@
 mod adapter;
+mod coverage;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write as _};
@@ -23,7 +24,7 @@ const CITATION_CORRECTNESS: &str = "citation-correctness";
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "Evaluate Evidence claims with an external decision API"
+    about = "Measure Evidence coverage and assess citation support"
 )]
 struct Args {
     /// Directory in an Evidence project.
@@ -56,6 +57,8 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Report claim, usage, or requirement coverage.
+    Coverage(coverage::CoverageArgs),
     /// Assess how well each claim is supported by its citations.
     CitationCorrectness {
         /// Evidence IDs or paths, optionally restricted to a claim with `#claim`.
@@ -143,7 +146,7 @@ fn main() -> ExitCode {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(error) => {
-            let _ = writeln!(io::stderr().lock(), "assess: {error:#}");
+            let _ = writeln!(io::stderr().lock(), "evidence-assess: {error:#}");
             ExitCode::from(2)
         }
     }
@@ -163,6 +166,9 @@ fn run(args: &Args) -> Result<bool> {
             (adapter, plan)
         }
         Command::Replay { target, run } => replay(args, &project, target, *run)?,
+        Command::Coverage(coverage) => {
+            return Ok(self::coverage::run(&project, coverage, args.json)? == 0);
+        }
     };
 
     let exchanges = send_requests(&adapter, &plan.requests, usize::from(args.jobs));
@@ -380,4 +386,22 @@ fn print_run(id: ObjectId, results: &[AssessmentResult], json_output: bool) -> R
         )?;
     }
     Ok(())
+}
+
+/// Prints a line to stdout (ignoring broken pipes).
+#[macro_export]
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout().lock(), $($arg)*);
+    }};
+}
+
+/// Prints a line to stderr.
+#[macro_export]
+macro_rules! warn_line {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), $($arg)*);
+    }};
 }

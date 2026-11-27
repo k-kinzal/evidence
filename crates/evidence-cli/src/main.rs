@@ -3,12 +3,31 @@
 
 mod cli;
 mod commands;
+mod extensions;
+mod graph;
 mod output;
 
-use clap::Parser;
+use std::process::ExitCode;
 
-fn main() -> std::process::ExitCode {
-    let cli = cli::Cli::parse();
+use clap::Parser as _;
+
+fn main() -> ExitCode {
+    let args: Vec<_> = std::env::args_os().collect();
+    if extensions::introspect(&args[1..]) {
+        return ExitCode::SUCCESS;
+    }
+    let cli = cli::Cli::parse_from(args);
+    if let cli::Command::Extension(args) = &cli.command
+        && let Some((name, args)) = args.split_first()
+    {
+        return match extensions::run(cli.directory.as_deref(), name, args) {
+            Ok(status) => status,
+            Err(error) => {
+                warn_line!("error: {error:#}");
+                ExitCode::from(2)
+            }
+        };
+    }
     let level = match cli.verbose {
         0 => "warn",
         1 => "info",
@@ -25,7 +44,7 @@ fn main() -> std::process::ExitCode {
         .init();
     let json = cli.json;
     match commands::run(cli) {
-        Ok(code) => std::process::ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(err) => {
             if json {
                 let body = serde_json::json!({
@@ -36,12 +55,7 @@ fn main() -> std::process::ExitCode {
             } else {
                 warn_line!("error: {err:#}");
             }
-            // A pin that met a concurrent change failed (1); anything else means the command
-            // itself could not run (2: usage, I/O, configuration, unmigrated files).
-            let conflict = err
-                .downcast_ref::<evidence_core::Error>()
-                .is_some_and(|e| matches!(e, evidence_core::Error::Conflict(_)));
-            std::process::ExitCode::from(if conflict { 1 } else { 2 })
+            ExitCode::from(2)
         }
     }
 }

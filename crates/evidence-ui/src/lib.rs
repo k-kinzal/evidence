@@ -2,7 +2,7 @@
 //!
 //! Everything the UI shows is computed here with `evidence-core`, without any GUI dependency, so
 //! it is unit-tested and the GPUI front end (`main.rs`, feature `gui`) only renders it. Like
-//! the CLI, it reads the files directly and never needs the SQLite index.
+//! the CLI, it reads the files directly.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -35,8 +35,6 @@ pub struct PairRow {
     pub claims: usize,
     /// Problems found in its evidence file.
     pub diagnostics: usize,
-    /// Format version 1 (read-only until migrated).
-    pub legacy: bool,
     /// Title (or the id).
     pub title: String,
     /// Subject path relative to the project root.
@@ -99,7 +97,7 @@ impl Filter {
             Self::Content(c) => row.content == c,
             Self::Runnable => !row.productions.is_empty(),
             Self::WithClaims => row.claims > 0,
-            Self::Diagnostics => row.diagnostics > 0 || row.legacy,
+            Self::Diagnostics => row.diagnostics > 0,
         }
     }
 }
@@ -144,7 +142,6 @@ impl Browser {
                         .collect(),
                     claims: s.claims.len(),
                     diagnostics,
-                    legacy: s.legacy,
                     title: pair.file.title.clone().unwrap_or_else(|| s.id.clone()),
                     subject: s.subject.clone(),
                     health: s.health,

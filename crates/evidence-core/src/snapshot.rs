@@ -82,9 +82,6 @@ pub(crate) enum ResolveError {
     /// A stored version is not in the object store.
     #[error("version {0} is not in the object store")]
     NotStored(String),
-    /// A fixed reference does not say which revision.
-    #[error("the fixed revision is not specified")]
-    RevisionUnspecified,
     /// The requested snapshot policy conflicts with its dependencies.
     #[error("{0}")]
     StorageConflict(String),
@@ -107,7 +104,6 @@ impl ResolveError {
             Self::SubjectMissing(_) => "subject-missing",
             Self::NeverProduced(_) => "never-produced",
             Self::NotStored(_) => "revision-missing",
-            Self::RevisionUnspecified => "revision-unspecified",
             Self::StorageConflict(_) => "storage-conflict",
             Self::Unreadable(_) => "unreadable",
             Self::NotText(_) => "not-text",
@@ -221,8 +217,7 @@ impl<'a> Resolver<'a> {
                     .ok_or_else(|| ResolveError::UnknownEvidence(reference.id().to_owned()))?;
                 self.current(pair)
             }
-            RefVersion::Revision(Some(v)) => self.fixed(self.ws.get(reference.id()), v),
-            RefVersion::Revision(None) => Err(ResolveError::RevisionUnspecified),
+            RefVersion::Revision(v) => self.fixed(self.ws.get(reference.id()), v),
         }
     }
 

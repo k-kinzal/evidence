@@ -26,7 +26,7 @@ pub(crate) const FORMAT_VERSION: u32 = 2;
     description = "Evidence file (format version 2) defining a subject, how it is produced, and its claims. Usually a sidecar `<subject>.evid` next to the subject; `subject` places the subject elsewhere."
 )]
 pub struct EvidenceFile {
-    /// Format version. Must be `2` (version 1 files are migrated with `evidence migrate`).
+    /// Format version. Must be `2`.
     pub version: u32,
     /// Stable identifier, unique within the project.
     #[schemars(regex(pattern = r"^[a-z0-9][a-z0-9._-]*$"))]
@@ -562,11 +562,6 @@ pub struct ReferenceDetail {
     /// reference satisfies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub satisfies: Option<String>,
-    /// Set only when a version 1 file is read: the reference is fixed, but its revision is
-    /// not known (no pin recorded one).
-    #[serde(skip)]
-    #[schemars(skip)]
-    pub(crate) revision_unknown: bool,
 }
 
 /// The version a reference resolves to.
@@ -575,8 +570,8 @@ pub struct ReferenceDetail {
 pub enum RefVersion {
     /// The current version of the target.
     Current,
-    /// A fixed version (`None`: fixed, but the revision is not known).
-    Revision(Option<ObjectId>),
+    /// A fixed version.
+    Revision(ObjectId),
 }
 
 impl Reference {
@@ -628,15 +623,11 @@ impl Reference {
 
     /// The version this reference resolves to.
     pub fn version(&self) -> RefVersion {
-        match self.detailed() {
-            Some(d) if d.revision.is_some() || d.revision_unknown => {
-                RefVersion::Revision(d.revision)
-            }
-            _ => RefVersion::Current,
-        }
+        self.revision()
+            .map_or(RefVersion::Current, RefVersion::Revision)
     }
 
-    /// Whether the reference is fixed to a revision (known or not).
+    /// Whether the reference is fixed to a revision.
     pub fn is_fixed(&self) -> bool {
         matches!(self.version(), RefVersion::Revision(_))
     }
@@ -667,11 +658,10 @@ impl Reference {
         }
         match self.version() {
             RefVersion::Current => {}
-            RefVersion::Revision(Some(r)) => {
+            RefVersion::Revision(r) => {
                 key.push('@');
                 key.push_str(&r.to_string());
             }
-            RefVersion::Revision(None) => key.push_str("@?"),
         }
         key
     }
@@ -838,7 +828,7 @@ mod tests {
             revision: Some(fixed),
             ..ReferenceDetail::default()
         });
-        assert_eq!(r.version(), RefVersion::Revision(Some(fixed)));
+        assert_eq!(r.version(), RefVersion::Revision(fixed));
         assert_eq!(r.key(), format!("req#heading=## R1@{fixed}"));
         assert_eq!(Reference::to_id("a").version(), RefVersion::Current);
         assert_eq!(

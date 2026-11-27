@@ -69,7 +69,7 @@ evidence = [{ ref = 'log', select = { lines = '1' } }]
 }
 
 fn assess(root: &Path, endpoint: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_assess"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_evidence-assess"));
     command
         .current_dir(root)
         .env_clear()

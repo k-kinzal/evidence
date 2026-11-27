@@ -1,4 +1,4 @@
-//! Project-wide validation (`evidence validate`).
+//! Project-wide diagnostics.
 
 use crate::format::{Action, ContentMode, Diagnostic, LocatorValue};
 

@@ -46,7 +46,9 @@ pub(crate) fn project_key(meta: &Path, create: bool) -> Result<Option<Encryption
         Err(e) => return Err(Error::io(&dir, e)),
     }
     // This also protects old projects with the earlier .evidence/.gitignore template.
-    ignore_local(&dir, b"*\n")?;
+    if create {
+        ignore_local(&dir, b"*\n")?;
+    }
     if let Some(bytes) = read_key(&key)? {
         return Ok(Some(EncryptionKey::new(bytes)));
     }
@@ -198,14 +200,10 @@ pub(crate) fn read(layout: &Layout, lock: &LockFile, path: &Path) -> format::Par
         })
     };
     if let Some(file) = &mut parsed.file {
-        if parsed.legacy.is_none()
-            && !parsed.inline_state
-            && let Ok(state) = unlock()
-        {
+        if let Ok(state) = unlock() {
             file.state = (!state.is_empty()).then_some(state);
         }
     } else if let Some(member) = &mut parsed.member
-        && member.version != 1
         && let Ok(state) = unlock()
     {
         member.state = (!state.is_empty()).then_some(state);

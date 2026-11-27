@@ -638,9 +638,15 @@ mod tests {
     #[test]
     fn restores_a_legacy_single_blob_replay_in_a_new_checkout() {
         let author = tempfile::tempdir().unwrap();
-        let author = Layout::init(author.path()).unwrap();
+        let author = Layout::open(&Layout::create(author.path()).unwrap())
+            .unwrap()
+            .writable()
+            .unwrap();
         let checkout = tempfile::tempdir().unwrap();
-        let checkout = Layout::init(checkout.path()).unwrap();
+        let checkout = Layout::open(&Layout::create(checkout.path()).unwrap())
+            .unwrap()
+            .writable()
+            .unwrap();
         let raw = b"original private prerequisite";
         let body = b"accepted result from the legacy format";
         let snapshot = ObjectId::of(body);

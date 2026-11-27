@@ -69,12 +69,10 @@ select = { heading = "## See also" }
 After writing, always:
 
 ```sh
-evidence validate <id>             # parses, references and selectors resolve
-evidence update --pin <id>         # record the claims against the sources as they are now
+evidence status             # parses, references and selectors resolve
 ```
 
-`--pin` fails (and records nothing) when a claim does not resolve; fix the selector and try
-again.
+Fix any diagnostics about the edited page, including selectors that no longer resolve.
 
 ## Links
 
@@ -103,7 +101,7 @@ evidence-wiki grep "<exact text>"          # lines in all pages
 evidence-wiki show <page> [--section S]    # metadata, outline, content
 evidence-wiki tool links '{"page":"<id>"}' # link graph; also: evidence, resolve, browse,
                                            # list_pages, query_table, wiki_overview
-evidence search <words>                    # search all evidence, including sources
+evidence graph "MATCH (e:Evidence)"        # all evidence definitions
 ```
 
 When the server runs, the same tools are available over MCP at `$EVIDENCE_WIKI_MCP`.

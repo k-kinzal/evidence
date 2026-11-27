@@ -145,22 +145,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "assess"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "evidence-core",
- "rustls",
- "rustls-native-certs",
- "serde",
- "serde_json",
- "tempfile",
- "tiny_http",
- "ureq",
-]
-
-[[package]]
 name = "atomic"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -423,15 +407,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clap_complete"
-version = "4.6.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a35200383f20018d41c14d1ab19c1727c697f544492143f7d93aa39f0187848"
-dependencies = [
- "clap",
-]
-
-[[package]]
 name = "clap_derive"
 version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -678,6 +653,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "evidence-assess"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "assert_fs",
+ "clap",
+ "evidence-core",
+ "insta",
+ "predicates",
+ "rustls",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiny_http",
+ "ureq",
+]
+
+[[package]]
 name = "evidence-cli"
 version = "0.1.0"
 dependencies = [
@@ -686,13 +681,20 @@ dependencies = [
  "assert_fs",
  "cas-fs",
  "clap",
- "clap_complete",
  "evidence-core",
+ "frogql",
  "insta",
  "predicates",
  "serde",
  "serde_json",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "evidence-completions"
+version = "0.1.0"
+dependencies = [
+ "clap",
 ]
 
 [[package]]
@@ -709,7 +711,6 @@ dependencies = [
  "jiff",
  "jsonschema",
  "proptest",
- "rusqlite",
  "schemars",
  "serde",
  "serde_json",
@@ -842,6 +843,42 @@ checksum = "e246562084dde8ebbcc943b261c406ce4f68e5032ec28029a251a47d6a295500"
 dependencies = [
  "num",
  "num-bigint",
+]
+
+[[package]]
+name = "frogql"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba253ce61bec449e9861edb1b072049db998aa1a39a9dd2e9f87bab5df6b87e8"
+dependencies = [
+ "js-sys",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "futures-core"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
+
+[[package]]
+name = "futures-task"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
+
+[[package]]
+name = "futures-util"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
+dependencies = [
+ "futures-core",
+ "futures-task",
+ "pin-project-lite",
+ "slab",
 ]
 
 [[package]]
@@ -1198,6 +1235,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8dc09d2154098bbf4ef54eab6b117a3c24cbbffe94046b16ee6d6d4510584d3a"
 dependencies = [
  "cfg-if",
+ "futures-util",
  "wasm-bindgen",
 ]
 
@@ -2089,6 +2127,12 @@ name = "similar"
 version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
+
+[[package]]
+name = "slab"
+version = "0.4.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smallvec"

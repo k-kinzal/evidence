@@ -238,7 +238,7 @@ fn refresh(layout: &Layout, ws: &Workspace, evid: &Path, entry: &Entry) {
     let Some(pair) = ws.pairs().iter().find(|p| p.evid_path == evid) else {
         return;
     };
-    if !pair.file.productions.is_empty() || pair.legacy {
+    if !pair.file.productions.is_empty() {
         return;
     }
     let Ok(text) = std::fs::read_to_string(evid) else {

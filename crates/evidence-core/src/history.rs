@@ -18,11 +18,9 @@ use crate::layout::Layout;
 pub struct Event {
     /// When it happened (RFC 3339).
     pub at: String,
-    /// `run`, `pin`, `migrate`, `remove` (and, before format version 2: `fetch`,
-    /// `transform`, `generate`, `review`).
+    /// Operation such as `run`, `pin`, or `remove`.
     pub operation: String,
-    /// `changed`, `unchanged`, `failed`, `pinned`, `migrated`, `removed` (`reviewed` before
-    /// format version 2).
+    /// Result such as `changed`, `unchanged`, `failed`, `pinned`, or `removed`.
     pub status: String,
     /// The production that ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]

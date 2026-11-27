@@ -2,7 +2,7 @@
 //!
 //! A `Project` is opened once and then answers every question and performs every change.
 //! Callers never deal with discovery, loading, target resolution, the clock, the project lock,
-//! the object store layout, or whether the SQLite index exists: those decisions live here.
+//! or the object store layout.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -17,14 +17,11 @@ use crate::assessment::{
 use crate::coverage::{self, CoverageReport, RequirementCoverage, UsageReport};
 use crate::error::{Error, Result};
 use crate::format::{Diagnostic, ObjectId};
-use crate::graph::{self, TreeNode};
 use crate::history::{self, Event};
 use crate::layout::{Layout, LoadedConfig};
-use crate::migrate::{self, MigrateOptions, MigrateReport};
 use crate::output::PairView;
 use crate::pin::{self, PinOptions, PinReport};
 use crate::remove::{self, Removed};
-use crate::search::{self, Hit};
 use crate::status::{self, PairStatus};
 use crate::store;
 use crate::update::{self, UpdateOptions, UpdateReport};
@@ -35,30 +32,47 @@ use crate::workspace::{Pair, Workspace};
 ///
 /// Relative paths in targets resolve against the directory the project was opened from.
 /// Methods that change files take `&mut self`, hold the project lock while they work, and
-/// leave `self` reloaded (and the optional index synced) afterwards.
+/// leave `self` reloaded afterwards.
 #[derive(Debug)]
 pub struct Project {
     layout: Layout,
     ws: Workspace,
     cwd: PathBuf,
     clock: Option<Timestamp>,
-    scan_only: bool,
 }
 
 impl Project {
     /// Opens the project containing `dir` (searching parent directories).
     pub fn open(dir: &Path) -> Result<Self> {
         let cwd = std::fs::canonicalize(dir).map_err(|e| Error::io(dir, e))?;
-        let layout = Layout::discover(&cwd)?;
+        let layout = Layout::open(&Layout::discover(&cwd)?)?;
         Self::load(layout, cwd)
     }
 
-    /// Creates a project in `dir` (creating the directory if needed) and opens it.
-    pub fn init(dir: &Path) -> Result<Self> {
+    /// Opens a project for diagnostics. If configuration cannot be applied, use defaults
+    /// to inspect definitions and return the configuration error alongside the project.
+    pub fn open_for_status(dir: &Path) -> Result<(Self, Option<Diagnostic>)> {
+        let cwd = std::fs::canonicalize(dir).map_err(|e| Error::io(dir, e))?;
+        let root = Layout::discover(&cwd)?;
+        match Layout::open(&root).and_then(|layout| Self::load(layout, cwd.clone())) {
+            Ok(project) => Ok((project, None)),
+            Err(Error::Config(message)) => {
+                let project = Self::load(Layout::with_defaults(&root)?, cwd)?;
+                Ok((project, Some(Diagnostic::error("config", message))))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Creates the project marker and returns the canonical root.
+    pub fn initialize(dir: &Path) -> Result<PathBuf> {
         std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
-        let layout = Layout::init(dir)?;
-        let cwd = layout.root().to_path_buf();
-        Self::load(layout, cwd)
+        Layout::create(dir)
+    }
+
+    /// Creates a project in `dir` and opens it.
+    pub fn init(dir: &Path) -> Result<Self> {
+        Self::open(&Self::initialize(dir)?)
     }
 
     fn load(layout: Layout, cwd: PathBuf) -> Result<Self> {
@@ -68,7 +82,6 @@ impl Project {
             ws,
             cwd,
             clock: None,
-            scan_only: false,
         })
     }
 
@@ -77,13 +90,6 @@ impl Project {
     #[must_use]
     pub fn at(mut self, now: Timestamp) -> Self {
         self.clock = Some(now);
-        self
-    }
-
-    /// Never uses the SQLite index; search scans the files.
-    #[must_use]
-    pub fn scan_only(mut self) -> Self {
-        self.scan_only = true;
         self
     }
 
@@ -332,32 +338,9 @@ impl Project {
         self.ws.downstream(id)
     }
 
-    /// Dependency trees: of `target`, or of every root when `None`. `invert` follows
-    /// dependents (impact) instead of dependencies.
-    pub fn tree(
-        &self,
-        target: Option<&str>,
-        invert: bool,
-        depth: Option<usize>,
-    ) -> Result<Vec<TreeNode>> {
-        let roots = match target {
-            Some(t) => vec![self.find(t)?.id.clone()],
-            None => graph::roots(&self.ws, invert),
-        };
-        Ok(roots
-            .iter()
-            .filter_map(|r| graph::tree(&self.ws, r, invert, depth))
-            .collect())
-    }
-
-    /// The whole graph in Graphviz DOT.
-    pub fn dot(&self) -> String {
-        graph::dot(&self.ws)
-    }
-
     // ---- History and search ----
 
-    /// Past runs, pins, and migrations of a pair, oldest first. A removed pair's history can still be
+    /// Past runs and pins of a pair, oldest first. A removed pair's history can still be
     /// read by its id.
     pub fn history(&self, target: &str) -> Result<Vec<Event>> {
         let id = match self.find(target) {
@@ -367,53 +350,23 @@ impl Project {
         history::read(&self.layout, &id)
     }
 
-    /// Full-text search over ids, titles, descriptions, tags, paths, and text subjects.
-    ///
-    /// Uses the SQLite index when this build has it and the configuration allows it, and
-    /// scans the files otherwise (also when the index cannot answer). Results are the same
-    /// either way.
-    pub fn search(&self, query: &str, limit: usize) -> Vec<Hit> {
-        #[cfg(feature = "index")]
-        if self.index_enabled() {
-            let indexed = crate::index::Index::open(&self.layout.index_path()).and_then(|mut i| {
-                i.sync(&self.ws)?;
-                i.search(query, limit)
-            });
-            match indexed {
-                Ok(Some(hits)) => return hits,
-                Ok(None) => {}
-                Err(e) => tracing::warn!("index unavailable, scanning files: {e}"),
-            }
-        }
-        search::search(&self.ws, query, limit)
-    }
-
     // ---- Changes ----
 
     /// Runs due and stale pairs (or the selected ones) and propagates changes downstream.
     pub fn update(&mut self, opts: &UpdateOptions) -> Result<UpdateReport> {
         let report = update::update(&self.layout, &self.cwd, self.now(), opts)?;
         if !opts.dry_run {
-            self.changed()?;
+            self.reload()?;
         }
         Ok(report)
     }
 
-    /// Pins the selected claims to the versions resolved now (`evidence update --pin`). Runs
+    /// Pins the selected claims to the versions resolved now. Runs
     /// nothing; all selected claims are recorded together or none is.
     pub fn pin(&mut self, opts: &PinOptions) -> Result<PinReport> {
         let report = pin::pin(&self.layout, &self.cwd, self.now(), opts)?;
         if report.recorded {
-            self.changed()?;
-        }
-        Ok(report)
-    }
-
-    /// Rewrites format version 1 evidence files as version 2.
-    pub fn migrate(&mut self, opts: &MigrateOptions) -> Result<MigrateReport> {
-        let report = migrate::migrate(&self.layout, &self.cwd, self.now(), opts)?;
-        if !opts.dry_run {
-            self.changed()?;
+            self.reload()?;
         }
         Ok(report)
     }
@@ -421,28 +374,15 @@ impl Project {
     /// Creates an evidence file and returns its path.
     pub fn add(&mut self, opts: &AddOptions) -> Result<PathBuf> {
         let path = add::add(&self.layout, &self.cwd, opts)?;
-        self.changed()?;
+        self.reload()?;
         Ok(path)
     }
 
     /// Removes a pair. Refuses when others use its current version, unless `force`.
     pub fn remove(&mut self, target: &str, keep_subject: bool, force: bool) -> Result<Removed> {
         let removed = remove::remove(&self.layout, &self.cwd, target, keep_subject, force)?;
-        self.changed()?;
-        Ok(removed)
-    }
-
-    fn changed(&mut self) -> Result<()> {
         self.reload()?;
-        #[cfg(feature = "index")]
-        if self.index_enabled() {
-            let synced = crate::index::Index::open(&self.layout.index_path())
-                .and_then(|mut i| i.sync(&self.ws));
-            if let Err(e) = synced {
-                tracing::warn!("index not updated: {e}");
-            }
-        }
-        Ok(())
+        Ok(removed)
     }
 
     // ---- Snapshots and the object store ----
@@ -548,35 +488,6 @@ impl Project {
         })
     }
 
-    // ---- The optional index ----
-
-    #[cfg(feature = "index")]
-    fn index_enabled(&self) -> bool {
-        !self.scan_only && self.layout.config().config.index.enabled != Some(false)
-    }
-
-    /// Brings the SQLite index up to date (incremental), or rebuilds it from scratch.
-    pub fn refresh_index(&self, rebuild: bool) -> Result<IndexStats> {
-        #[cfg(feature = "index")]
-        {
-            let mut index = crate::index::Index::open(&self.layout.index_path())?;
-            let mut stats = if rebuild {
-                index.rebuild(&self.ws)?
-            } else {
-                index.sync(&self.ws)?
-            };
-            stats.path = self.relative(&self.layout.index_path());
-            Ok(stats)
-        }
-        #[cfg(not(feature = "index"))]
-        {
-            let _ = rebuild;
-            Err(Error::Invalid(
-                "this build has no index support (feature `index`)".into(),
-            ))
-        }
-    }
-
     // ---- Watching for changes ----
 
     /// Cheap change detector: sizes and modification times of every evidence file, subject,
@@ -665,17 +576,4 @@ pub struct Pruned {
     pub removed: usize,
     /// Bytes freed.
     pub bytes_freed: u64,
-}
-
-/// Result of [`Project::refresh_index`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct IndexStats {
-    /// Index file, relative to the project root.
-    pub path: String,
-    /// Pairs (re-)indexed.
-    pub indexed: usize,
-    /// Pairs removed from the index.
-    pub removed: usize,
-    /// Pairs unchanged.
-    pub unchanged: usize,
 }

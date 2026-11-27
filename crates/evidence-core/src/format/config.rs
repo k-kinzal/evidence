@@ -25,9 +25,6 @@ pub struct Config {
     /// Discovery of evidence files.
     #[serde(default)]
     pub discovery: DiscoveryConfig,
-    /// Optional SQLite index.
-    #[serde(default)]
-    pub index: IndexConfig,
     /// Coverage: when a claim or a reference is too broad to count as precise evidence.
     #[serde(default)]
     pub coverage: CoverageConfig,
@@ -118,14 +115,4 @@ pub struct DiscoveryConfig {
     /// Additional gitignore-style patterns of paths to skip when looking for evidence files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore: Vec<String>,
-}
-
-/// `[index]`
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct IndexConfig {
-    /// Maintain `.evidence/index.db` automatically after changes. Defaults to `true`
-    /// when the binary is built with index support.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
 }

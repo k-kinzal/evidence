@@ -9,11 +9,6 @@ repository.workspace = true
 authors.workspace = true
 keywords = ["evidence", "provenance", "lineage", "osint"]
 
-[features]
-default = []
-## SQLite full-text index for faster search (FTS5, trigram). Search works without it.
-index = ["dep:rusqlite"]
-
 [dependencies]
 cas-fs = { workspace = true, features = ["serde"] }
 argon2.workspace = true
@@ -23,7 +18,6 @@ hex.workspace = true
 ignore.workspace = true
 jiff.workspace = true
 jsonschema = { workspace = true, features = ["resolve-file"] }
-rusqlite = { workspace = true, optional = true }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

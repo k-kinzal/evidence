@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn uncommitted_entries_are_discarded_and_committed_ones_rolled_forward() {
         let dir = tempfile::tempdir().unwrap();
-        let layout = Layout::init(dir.path()).unwrap();
+        let layout = Layout::open(&Layout::create(dir.path()).unwrap()).unwrap();
         let a = dir.path().join("a.txt");
         let b = dir.path().join("b.txt");
         std::fs::write(&a, "old a").unwrap();

@@ -2,7 +2,7 @@
 //!
 //! A wiki-like view of an Evidence project: every pair with its freshness, the subject with
 //! coverage highlighting, the evidence file, upstream/downstream navigation, and history with
-//! snapshot diffs. It reads the same files as the CLI (no index needed) and refreshes
+//! snapshot diffs. It reads the same files as the CLI and refreshes
 //! automatically when they change.
 #![forbid(unsafe_code)]
 
@@ -573,9 +573,6 @@ impl EvidenceApp {
             .child(health_badge(v.status.health));
         if v.working_differs {
             title = title.child(badge("working file differs", theme::amber()));
-        }
-        if v.status.legacy {
-            title = title.child(badge("format v1", theme::amber()));
         }
         let mut header = div().flex().flex_col().child(title).child(
             div()

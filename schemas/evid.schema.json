@@ -174,7 +174,8 @@
           "description": "Optional check run on every new version of the subject before it is adopted."
         },
         "version": {
-          "description": "Format version. Must be `2` (version 1 files are migrated with `evidence migrate`).",
+          "const": 2,
+          "description": "Format version. Must be `2`.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -333,7 +334,7 @@
       "oneOf": [
         {
           "const": "keep",
-          "description": "Keep it and report `member-removed` until it is removed with `evidence remove`.",
+          "description": "Keep it and report `member-removed` until its definition is removed.",
           "type": "string"
         },
         {

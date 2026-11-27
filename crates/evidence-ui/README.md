@@ -4,7 +4,7 @@
 like a wiki: open a project and see what is known, where it came from, and how fresh it is.
 
 **Role:** it is a read-only viewer over `evidence-core`. It reads the same files as the
-CLI, does not need the SQLite index, and never changes anything. Changes go through the CLI
+CLI and opens the project read-only. Changes go through the CLI
 or an editor; the window reloads by itself.
 
 ## Usage

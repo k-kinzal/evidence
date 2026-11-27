@@ -31,7 +31,7 @@ fn id(n: usize, i: usize) -> String {
 
 fn write_project(n: usize, edges: &[(usize, usize)]) -> (tempfile::TempDir, Layout) {
     let dir = tempfile::tempdir().unwrap();
-    let project = Layout::init(dir.path()).unwrap();
+    let project = Layout::open(&Layout::create(dir.path()).unwrap()).unwrap();
     for i in 0..n {
         let deps: Vec<String> = edges
             .iter()

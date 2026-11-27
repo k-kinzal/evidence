@@ -1,0 +1,37 @@
+#compdef evidence
+
+local cmd sub word i
+local -a command_path candidates
+for ((i = 2; i < CURRENT; i++)); do
+    word=${words[i]}
+    case $word in
+        -C|--directory|--color) ((i++)); continue ;;
+        -*) continue ;;
+    esac
+    if [[ -z $cmd ]]; then
+        cmd=$word
+    elif [[ $cmd == config && -z $sub ]]; then
+        sub=$word
+    fi
+done
+if [[ -n $cmd ]] && ! command evidence --list-cmds=builtins | grep -Fxq -- "$cmd"; then
+    local hook="_evidence_$cmd"
+    if (( $+functions[$hook] )); then "$hook"; fi
+    return
+fi
+
+[[ -z $cmd ]] || command_path+=("$cmd")
+[[ -z $sub ]] || command_path+=("$sub")
+case ${words[CURRENT-1]} in
+    -C|--directory) _files -/; return ;;
+    --color) compadd auto always never; return ;;
+esac
+if [[ $PREFIX == -* ]]; then
+    candidates=("${(@f)$(command evidence "${command_path[@]}" --completion-helper)}")
+elif [[ -z $cmd || ( $cmd == config && -z $sub ) ]]; then
+    candidates=("${(@f)$(command evidence "${command_path[@]}" --list-cmds)}")
+elif [[ $cmd == init || $cmd == update ]]; then
+    _files
+    return
+fi
+compadd -a candidates

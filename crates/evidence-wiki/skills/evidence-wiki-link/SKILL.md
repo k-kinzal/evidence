@@ -27,8 +27,7 @@ For each mention, open the page at the line (`evidence-wiki show <page>`), and l
 when the grammar needs the original wording. Skip mentions that mean something else (a
 common word that happens to be a title), inside code, headings, or quotations.
 
-Edits that only add link syntax do not change what a claim says, but they change the text
-a claim covers: run `evidence update --pin <page>` afterwards.
+Link syntax changes the text covered by a claim. Check its selector after editing.
 
 ## 3. Ambiguous names
 
@@ -51,7 +50,6 @@ the orphan to a fitting category (`/evidence-wiki-update-category`).
 ## 6. Check
 
 ```sh
-evidence validate
-evidence update --pin <each changed page>
+evidence status
 evidence-wiki check --json
 ```

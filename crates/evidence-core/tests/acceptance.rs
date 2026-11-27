@@ -928,28 +928,6 @@ fn ac31_modified_produced_lists_do_not_change_members() {
         "an unadopted list adds no members"
     );
     assert_eq!(fx.status("list").health, Health::Modified);
-    let scanned: Vec<_> = fx
-        .project()
-        .scan_only()
-        .statuses()
-        .into_iter()
-        .map(|s| (s.id, s.health))
-        .collect();
-    fx.project().refresh_index(true).unwrap();
-    let indexed: Vec<_> = fx
-        .project()
-        .statuses()
-        .into_iter()
-        .map(|s| (s.id, s.health))
-        .collect();
-    assert_eq!(scanned, indexed);
-    let q = |p: Project| {
-        p.search("item", 10)
-            .into_iter()
-            .map(|h| h.id)
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(q(fx.project().scan_only()), q(fx.project()));
 }
 
 #[test]
@@ -1319,18 +1297,6 @@ fn a_fixed_reference_without_a_revision_is_diagnosed() {
                 && d.file.as_deref() == Some(std::path::Path::new("design.md.evid"))),
         "{:?}",
         p.problems()
-    );
-
-    // A version 1 snapshot lifecycle with no recorded revision: unspecified, not Current.
-    fx.write(
-        "design.md.evid",
-        "version = 1\nkind = \"authored\"\nid = \"design\"\nlifecycle = \"snapshot\"\n[[claims]]\nid = \"d1\"\nselect = { lines = \"3\" }\nevidence = [\"req\"]\n",
-    );
-    let c = fx.claim("design", "d1");
-    assert_eq!(c.health, ClaimHealth::Broken, "{c:?}");
-    assert!(
-        c.reasons.iter().any(|r| r.code == "revision-unspecified"),
-        "{c:?}"
     );
 }
 

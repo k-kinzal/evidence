@@ -36,8 +36,6 @@ pub struct Pair {
     pub outside_project: bool,
     /// Set when the pair is a member of a list (`member_of`).
     pub membership: Option<Membership>,
-    /// The evidence file must be migrated before the tool updates its state.
-    pub legacy: bool,
 }
 
 /// How one pair relates to another.
@@ -291,8 +289,7 @@ impl Workspace {
             let (Some(file), Some(subject)) = (parsed.file.clone(), subject.clone()) else {
                 continue;
             };
-            let legacy = parsed.legacy.is_some() || parsed.inline_state;
-            ws.insert(layout, &mut by_subject, path, file, subject, None, legacy);
+            ws.insert(layout, &mut by_subject, path, file, subject, None);
         }
 
         // Members: compose each definition from its parent's template and list entry.
@@ -340,17 +337,7 @@ impl Workspace {
             });
             let err = |code, msg: String| Diagnostic::error(code, msg).in_file(&rel);
             let parent = ws.get(&member.member_of);
-            let parent_legacy = parent.is_some_and(|p| p.legacy);
-            let v1 = parent
-                .filter(|p| p.legacy)
-                .and_then(|p| document::read(&p.evid_path).legacy);
-            // A version 1 parent's template was converted in memory; its version 1 members
-            // are composed from the template as written.
-            let members = if let Some(legacy) = &v1 {
-                legacy.members.clone()
-            } else {
-                parent.and_then(|p| p.file.members.clone())
-            };
+            let members = parent.and_then(|p| p.file.members.clone());
             let Some(members) = members else {
                 ws.diagnostics.push(err(
                     "unknown-ref",
@@ -377,8 +364,7 @@ impl Workspace {
                 ));
                 continue;
             };
-            let version = if v1.is_some() { 1 } else { 2 };
-            let (file, diagnostics) = compose_file(&members, member, &known.fields, version);
+            let (file, diagnostics) = compose_file(&members, member, &known.fields);
             ws.diagnostics
                 .extend(diagnostics.into_iter().map(|d| d.in_file(&rel)));
             let Some(file) = file else { continue };
@@ -398,7 +384,6 @@ impl Workspace {
                 file,
                 subject,
                 Some(membership),
-                parent_legacy || member.version == 1,
             );
         }
 
@@ -470,7 +455,6 @@ impl Workspace {
         file: EvidenceFile,
         subject: PathBuf,
         membership: Option<Membership>,
-        legacy: bool,
     ) {
         let ws = self;
         let rel = layout.relative(path);
@@ -509,7 +493,7 @@ impl Workspace {
                         "subject-outside-project",
                         format!(
                             "the subject {} is outside the project: a checkout of the project \
-                             alone does not contain it, and `remove` leaves it in place",
+                             alone does not contain it",
                             subject.display()
                         ),
                     )
@@ -528,7 +512,6 @@ impl Workspace {
                 file,
                 outside_project,
                 membership,
-                legacy,
             });
         }
     }

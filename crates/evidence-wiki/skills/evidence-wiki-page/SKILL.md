@@ -29,14 +29,14 @@ your summary.
 ## 3. Wanted pages: research first
 
 1. Read the pages that link to the name (`from`), to learn what readers expect.
-2. Find sources: `evidence search "<name>"` (all evidence, including raw sources),
-   `evidence-wiki search "<name>" --json`, `evidence-wiki grep "<name>"`.
+2. Find sources with `evidence-wiki search "<name>" --json` and `evidence-wiki grep
+   "<name>"`. Use `evidence graph` to inspect evidence IDs and their connections.
 3. If nothing in the project supports a page, do not invent one. Either:
    - the name is another page under a different name: add it as an `alias` of that page;
    - the link is wrong: fix it in the linking page (`/evidence-wiki-link`);
    - or leave it and report "no source for <name>".
-   Adding a new source (`evidence add … --kind source -- <command>`) is fine when the task
-   or project instructions allow fetching.
+   If the task allows fetching a new source, write its `.evid` definition with a
+   `[[productions]]` entry that writes the subject. Run `evidence update <source-id>`.
 
 ## 4. Write
 
@@ -63,8 +63,7 @@ Mark navigation-only sections (`## See also`) as `[[primary]]`.
 ## 5. Check
 
 ```sh
-evidence validate <id>
-evidence update --pin <id>
+evidence status
 evidence-wiki show <id> --outline        # title, categories, links resolve
 evidence-wiki check --json               # the name left wanted_pages / unpaired
 ```
