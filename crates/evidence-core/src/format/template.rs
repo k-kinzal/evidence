@@ -34,6 +34,8 @@ pub(crate) enum Placeholder<'a> {
     InputSnapshot(&'a str),
     /// `{env.NAME}`.
     Env(&'a str),
+    /// `{locator.KEY}`, in reconstruction commands.
+    Locator(&'a str),
 }
 
 impl<'a> Placeholder<'a> {
@@ -50,6 +52,9 @@ impl<'a> Placeholder<'a> {
                 Some(n) if !n.is_empty() => Self::InputSnapshot(n),
                 _ => Self::Input(input),
             });
+        }
+        if let Some(key) = name.strip_prefix("locator.").filter(|key| !key.is_empty()) {
+            return Ok(Self::Locator(key));
         }
         if name.starts_with("member.") {
             return Err(format!(
@@ -128,6 +133,7 @@ mod tests {
             Placeholder::Input(n) => format!("<in:{n}>"),
             Placeholder::InputSnapshot(n) => format!("<snap:{n}>"),
             Placeholder::Env(n) => format!("<env:{n}>"),
+            Placeholder::Locator(n) => format!("<locator:{n}>"),
         })
     }
 

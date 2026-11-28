@@ -39,6 +39,7 @@ pub(crate) struct RunContext {
     pub cache: PathBuf,
     pub context_file: PathBuf,
     pub inputs: Vec<RunInput>,
+    pub(crate) reconstruction: BTreeMap<String, String>,
 }
 
 impl RunContext {
@@ -71,6 +72,14 @@ impl RunContext {
                 .input(n)
                 .map(|i| i.snapshot.clone())
                 .ok_or_else(|| format!("`{{input.{n}.snapshot}}` does not name an input")),
+            Placeholder::Locator(key) if allow_env => self
+                .reconstruction
+                .get(key)
+                .cloned()
+                .ok_or_else(|| format!("missing reconstruction value `{key}`")),
+            Placeholder::Locator(_) => {
+                Err("reconstruction placeholders are unavailable in locator values".into())
+            }
             Placeholder::Env(var) if allow_env => {
                 std::env::var(var).map_err(|_| format!("environment variable `{var}` is not set"))
             }
@@ -353,6 +362,7 @@ mod tests {
 
     fn ctx(dir: &Path) -> RunContext {
         RunContext {
+            reconstruction: BTreeMap::new(),
             id: "x".into(),
             root: dir.into(),
             dir: dir.into(),

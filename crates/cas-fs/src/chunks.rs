@@ -83,6 +83,25 @@ impl ChunkStore {
         })
     }
 
+    /// The chunk IDs named by a verified manifest.
+    pub fn manifest_chunks(&self, id: &ObjectId) -> Result<Vec<ObjectId>, Error> {
+        Ok(self.open(id)?.chunks)
+    }
+
+    /// Reads a manifest or chunk by its address, verifying its digest.
+    pub fn read_part(&self, manifest: bool, id: &ObjectId) -> Result<Vec<u8>, Error> {
+        self.read_checked(if manifest { "manifest" } else { "chunk" }, id)
+    }
+
+    /// Installs an immutable manifest or chunk after verifying its digest.
+    pub fn import_part(&self, manifest: bool, id: &ObjectId, bytes: &[u8]) -> Result<(), Error> {
+        if bytes.len() > CHUNK_SIZE || ObjectId::of(bytes) != *id {
+            return Err(invalid());
+        }
+        let kind = if manifest { "manifest" } else { "chunk" };
+        self.save(kind, bytes).map(|_| ())
+    }
+
     /// Checks all stored manifests and chunks, including the full digest of each stream.
     pub fn verify(&self) -> Result<VerifyReport, Error> {
         let mut report = VerifyReport::default();

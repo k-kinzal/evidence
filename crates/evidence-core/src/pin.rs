@@ -18,7 +18,7 @@ use crate::format::{
     SnapshotStorage,
 };
 use crate::history::{self, Event, PinEvent};
-use crate::journal::{self, Transaction};
+use crate::journal::Transaction;
 use crate::layout::Layout;
 use crate::lockfile::LockFile;
 use crate::snapshot::{ResolveError, Resolver, Version, capture, disk_snapshot, selected_hash};
@@ -220,15 +220,6 @@ pub(crate) fn pin(
             "`--pin` needs targets: `<path or id>` or `<path or id>#<claim>`".into(),
         ));
     }
-    let writable;
-    let (layout, _lock) = if opts.dry_run {
-        (layout, None)
-    } else {
-        let lock = layout.lock()?;
-        writable = layout.writable()?;
-        journal::recover(&writable)?;
-        (&writable, Some(lock))
-    };
     let ws = Workspace::load(layout)?;
     let resolver = Resolver::new(&ws);
     let by = opts

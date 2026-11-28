@@ -12,8 +12,8 @@ use crate::error::{Error, Result};
 /// Name of the project metadata directory.
 pub(crate) const DIR: &str = ".evidence";
 
-const LOCAL_IGNORE: &[u8] = b"/tmp/\n/cache/\n/private/\n/journal/\n/objects/tmp/\n/objects/blob/\n/objects/tree/\n/objects/sealed/\n/objects/replay/blob/\n/history/\n/lock\n/config.local.toml\n";
-const CHUNK_ATTRIBUTES: &[u8] = b"objects/plain/v2/** binary -filter -ident\nobjects/replay/v2/** binary -filter -ident -delta\nobjects/pins/v1/** binary -filter -ident -delta\n";
+const LOCAL_IGNORE: &[u8] = b"/tmp/\n/cache/\n/private/\n/journal/\n/objects/tmp/\n/objects/blob/\n/objects/tree/\n/objects/sealed/\n/objects/replay/blob/\n/history/\n/lock\n/config.local.toml\n/distributed/local/\n";
+const CHUNK_ATTRIBUTES: &[u8] = b"objects/plain/v2/** binary -filter -ident\nobjects/replay/v2/** binary -filter -ident -delta\nobjects/pins/v1/** binary -filter -ident -delta\ndistributed/records/** binary -filter -ident -delta\ndistributed/objects/** binary -filter -ident -delta\n";
 
 /// Configuration layers, lowest precedence first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +50,17 @@ impl LoadedConfig {
                 figment = figment.merge(Toml::file_exact(path));
             }
         }
-        let sections = ["user", "execution", "store", "discovery", "coverage"];
+        let sections = [
+            "user",
+            "execution",
+            "store",
+            "discovery",
+            "coverage",
+            "remote",
+            "branch",
+            "daemon",
+            "gc",
+        ];
         figment = figment.merge(Env::prefixed("EVIDENCE_").split("__").filter(move |k| {
             let first = k
                 .as_str()

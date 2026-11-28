@@ -23,7 +23,7 @@ use crate::format::{
     PinRecord, Production, Reference, RunRecord, RunStatus, document,
 };
 use crate::history::{self, Event, PinEvent};
-use crate::journal::{self, Transaction};
+use crate::journal::Transaction;
 use crate::layout::Layout;
 use crate::lockfile::LockFile;
 use crate::membership::{self, MemberAction, MemberChange};
@@ -174,9 +174,20 @@ pub struct UpdateReport {
     /// Members of lists that were added, moved, or removed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<MemberChange>,
+    /// Records received from configured peers.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub fetched: usize,
+    /// Incoming changes and distributed worktree problems.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub distributed: Vec<crate::distributed::Issue>,
     /// Accepted encrypted snapshots recovered from their exact inputs during this update.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub restored: Vec<String>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde passes a reference.
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 impl UpdateReport {
@@ -185,7 +196,12 @@ impl UpdateReport {
         self.runs
             .iter()
             .any(|r| r.status == Some(RunStatus::Failed))
-            || (!self.dry_run && self.skipped.iter().any(|s| s.code == "locked-snapshot"))
+            || (!self.dry_run
+                && (self.skipped.iter().any(|s| s.code == "locked-snapshot")
+                    || self
+                        .distributed
+                        .iter()
+                        .any(|i| matches!(i.code, "conflict" | "local-edit" | "missing-object"))))
     }
 }
 
@@ -207,17 +223,15 @@ pub(crate) fn update(
     cwd: &Path,
     now: Timestamp,
     opts: &UpdateOptions,
+    blocked: &BTreeSet<String>,
+    conflict_origins: &BTreeMap<String, (ObjectId, crate::format::SnapshotStorage)>,
 ) -> Result<UpdateReport> {
-    let writable;
-    let (layout, _lock) = if opts.dry_run {
-        (layout, None)
-    } else {
-        let lock = layout.lock()?;
-        writable = layout.writable()?;
-        journal::recover(&writable)?;
-        (&writable, Some(lock))
+    let load_workspace = || {
+        let mut ws = Workspace::load(layout)?;
+        ws.conflict_origins.clone_from(conflict_origins);
+        Ok::<_, Error>(ws)
     };
-    let mut ws = Workspace::load(layout)?;
+    let mut ws = load_workspace()?;
     let mut report = UpdateReport {
         dry_run: opts.dry_run,
         ..UpdateReport::default()
@@ -253,7 +267,7 @@ pub(crate) fn update(
             .map(|p| p.id.clone())
             .collect();
         if sync_members(layout, &ws, &parents, now, &mut report) {
-            ws = Workspace::load(layout)?;
+            ws = load_workspace()?;
         }
     }
     let jobs = opts
@@ -262,7 +276,15 @@ pub(crate) fn update(
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get))
         .max(1);
 
-    let isolated = (opts.isolated && explicit).then_some(&selected);
+    let eligible: HashSet<_> = ws
+        .pairs()
+        .iter()
+        .filter(|p| {
+            !blocked.contains(&p.id) && (!opts.isolated || !explicit || selected.contains(&p.id))
+        })
+        .map(|p| p.id.clone())
+        .collect();
+    let isolated = (!blocked.is_empty() || opts.isolated && explicit).then_some(&eligible);
     let mut tried_replay = BTreeMap::new();
     let mut restored = if opts.dry_run {
         HashSet::new()
@@ -280,7 +302,7 @@ pub(crate) fn update(
                 break;
             }
             sync_members(layout, &ws, &lists, now, &mut report);
-            ws = Workspace::load(layout)?;
+            ws = load_workspace()?;
         }
         restored.extend(crate::replay::restore_available(
             layout,
@@ -308,7 +330,7 @@ pub(crate) fn update(
             let Some(pair) = ws.get(&node.pair) else {
                 continue;
             };
-            if locked(pair) {
+            if blocked.contains(&pair.id) || locked(pair) {
                 continue;
             }
             if restored.contains(&pair.id) && !opts.force {
@@ -380,7 +402,7 @@ pub(crate) fn update(
             crate::replay::restore_available(layout, &mut ws, isolated, &mut tried_replay)?;
         restored.extend(recovered);
         if sync_members(layout, &ws, &lists, now, &mut report) {
-            ws = Workspace::load(layout)?;
+            ws = load_workspace()?;
             levels = ws.run_levels()?;
             next = 0;
         }
@@ -417,7 +439,7 @@ pub(crate) fn update(
             id: pair.id.clone(),
             code: "locked-snapshot".into(),
             message: if shared_plain {
-                format!("{} needs its accepted plaintext snapshot from Git", pair.id)
+                format!("{} needs its accepted plaintext snapshot", pair.id)
             } else {
                 format!(
                     "{} needs the exact input versions for its accepted snapshot",
@@ -820,6 +842,17 @@ fn stage(
     std::fs::create_dir_all(&cache).map_err(|e| io(&cache, e))?;
     let output = tmp.join("out").join(file_name(pair));
     let claims_path = tmp.join("claims.json");
+    let reconstruction =
+        if state.runs.contains_key(&production.name) || production.reconstruct.is_empty() {
+            None
+        } else {
+            LockFile::load(layout)
+                .map_err(|e| e.to_string())?
+                .entry(&pair.id)
+                .acquisition
+                .filter(|a| a.production == production.name)
+                .map(|a| a.locator)
+        };
     let ctx = RunContext {
         id: pair.id.clone(),
         root: layout.root().to_path_buf(),
@@ -830,6 +863,7 @@ fn stage(
         cache,
         context_file: tmp.join("context.json"),
         inputs: run_inputs,
+        reconstruction: reconstruction.clone().unwrap_or_default(),
     };
     write_context(
         &ctx,
@@ -840,7 +874,10 @@ fn stage(
         &state,
     )?;
     let timeout = layout.config().config.execution.timeout.map(|t| t.0);
-    let action = production.action();
+    let mut action = production.action();
+    if reconstruction.is_some() {
+        action.run.clone_from(&production.reconstruct);
+    }
     let stdout_to = if production.writes_subject() {
         &output
     } else {
@@ -876,7 +913,10 @@ fn stage(
     } else {
         None
     };
-    let locator = exec::locator(&ctx, &action, timeout)?;
+    let locator = match reconstruction {
+        Some(locator) => locator,
+        None => exec::locator(&ctx, &action, timeout)?,
+    };
 
     let claims = if production.writes_claims() {
         let returned = read_claims(&claims_path, production)?;

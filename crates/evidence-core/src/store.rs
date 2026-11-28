@@ -71,8 +71,17 @@ fn referenced_snapshots(ws: &Workspace) -> HashSet<(ObjectId, Option<Storage>)> 
 pub(crate) fn prune(layout: &Layout, drop_history: bool) -> Result<cas_fs::PruneReport> {
     let _lock = layout.lock()?;
     crate::journal::recover(layout)?;
+    prune_locked(layout, drop_history, std::iter::empty())
+}
+
+pub(crate) fn prune_locked(
+    layout: &Layout,
+    drop_history: bool,
+    persisted: impl IntoIterator<Item = ObjectId>,
+) -> Result<cas_fs::PruneReport> {
     let ws = Workspace::load(layout)?;
     let mut roots = referenced_snapshots(&ws);
+    roots.extend(persisted.into_iter().map(|id| (id, None)));
     for pair in ws.pairs() {
         roots.extend(crate::assessment::roots(pair)?);
     }

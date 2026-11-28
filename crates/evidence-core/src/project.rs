@@ -20,11 +20,11 @@ use crate::format::{Diagnostic, ObjectId};
 use crate::history::{self, Event};
 use crate::layout::{Layout, LoadedConfig};
 use crate::output::PairView;
-use crate::pin::{self, PinOptions, PinReport};
+use crate::pin::{PinOptions, PinReport};
 use crate::remove::{self, Removed};
 use crate::status::{self, PairStatus};
 use crate::store;
-use crate::update::{self, UpdateOptions, UpdateReport};
+use crate::update::{UpdateOptions, UpdateReport};
 use crate::validate;
 use crate::workspace::{Pair, Workspace};
 
@@ -352,23 +352,103 @@ impl Project {
 
     // ---- Changes ----
 
-    /// Runs due and stale pairs (or the selected ones) and propagates changes downstream.
+    /// Fetches peer records, restores accepted snapshots, and runs due and stale pairs.
     pub fn update(&mut self, opts: &UpdateOptions) -> Result<UpdateReport> {
-        let report = update::update(&self.layout, &self.cwd, self.now(), opts)?;
+        self.update_with_sync(opts, &crate::distributed::SyncOptions::default())
+    }
+
+    /// Updates with explicit synchronization options.
+    pub fn update_with_sync(
+        &mut self,
+        opts: &UpdateOptions,
+        sync: &crate::distributed::SyncOptions,
+    ) -> Result<UpdateReport> {
+        let report = crate::distributed::update(&self.layout, &self.cwd, self.now(), opts, sync)?;
         if !opts.dry_run {
             self.reload()?;
         }
         Ok(report)
     }
 
-    /// Pins the selected claims to the versions resolved now. Runs
-    /// nothing; all selected claims are recorded together or none is.
+    /// Records selected pins against the versions resolved now.
     pub fn pin(&mut self, opts: &PinOptions) -> Result<PinReport> {
-        let report = pin::pin(&self.layout, &self.cwd, self.now(), opts)?;
-        if report.recorded {
+        self.pin_with_sync(opts, false)
+    }
+
+    /// Records pins, with an option to work offline.
+    pub fn pin_with_sync(&mut self, opts: &PinOptions, offline: bool) -> Result<PinReport> {
+        let report = crate::distributed::pin(&self.layout, &self.cwd, self.now(), opts, offline)?;
+        if !opts.dry_run {
             self.reload()?;
         }
         Ok(report)
+    }
+
+    /// Sends recorded versions and available shared snapshots to a named peer.
+    pub fn push(&self, remote: Option<&str>) -> Result<crate::distributed::SyncReport> {
+        crate::distributed::push(&self.layout, remote)
+    }
+
+    /// Reports local-only snapshots and distributed conflicts.
+    pub fn distributed_status(&self) -> Result<Vec<crate::distributed::Issue>> {
+        crate::distributed::status(&self.layout, &self.ws)
+    }
+
+    /// Lists the current branch and the known branch names.
+    pub fn branches(&self) -> Result<(String, std::collections::BTreeSet<String>)> {
+        crate::distributed::branches(&self.layout)
+    }
+
+    /// Creates or removes a local branch.
+    pub fn change_branch(&self, name: &str, delete: bool) -> Result<()> {
+        crate::distributed::change_branch(&self.layout, name, delete, self.now())
+    }
+
+    /// Switches the working tree to the named branch.
+    pub fn switch_branch(&mut self, name: &str) -> Result<()> {
+        crate::distributed::switch(&self.layout, name)?;
+        self.reload()
+    }
+
+    /// Integrates versions from the named branch into the current branch.
+    pub fn merge_branch(&mut self, name: &str) -> Result<Vec<crate::distributed::Issue>> {
+        let result = crate::distributed::merge(&self.layout, name)?;
+        self.reload()?;
+        Ok(result)
+    }
+
+    /// Writes conflict markers for editing or resolves the conflict by adopting a parent.
+    pub fn resolve_version(&mut self, id: &str, side: Option<&str>) -> Result<Option<ObjectId>> {
+        let result = crate::distributed::resolve(&self.layout, id, side, self.now())?;
+        self.reload()?;
+        Ok(result)
+    }
+
+    /// Copies an earlier version into a new record.
+    pub fn revert_version(&mut self, id: &str, version: Option<&str>) -> Result<ObjectId> {
+        let result = crate::distributed::revert(&self.layout, id, version, self.now())?;
+        self.reload()?;
+        Ok(result)
+    }
+
+    /// Lists the immutable versions of one evidence ID, newest descendants first.
+    pub fn version_log(
+        &self,
+        id: &str,
+        branch: Option<&str>,
+        all: bool,
+    ) -> Result<Vec<crate::distributed::LogEntry>> {
+        crate::distributed::log(&self.layout, id, branch, all)
+    }
+
+    /// Compares two versions, or compares a recorded version with the working tree.
+    pub fn version_diff(&self, a: &str, b: Option<&str>) -> Result<crate::distributed::Difference> {
+        crate::distributed::diff(&self.layout, a, b)
+    }
+
+    /// Verifies the local object and record stores.
+    pub fn gc(&self) -> Result<crate::distributed::GcReport> {
+        crate::distributed::gc(&self.layout)
     }
 
     /// Creates an evidence file and returns its path.

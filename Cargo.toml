@@ -7,6 +7,7 @@ members = [
     "crates/evidence-core",
     "crates/evidence-cli",
     "crates/evidence-completions",
+    "crates/evidence-daemon",
     "crates/evidence-wiki",
     "xtask",
 ]
@@ -19,6 +20,7 @@ default-members = [
     "crates/evidence-core",
     "crates/evidence-cli",
     "crates/evidence-completions",
+    "crates/evidence-daemon",
     "crates/evidence-wiki",
 ]
 

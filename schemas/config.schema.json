@@ -1,5 +1,16 @@
 {
   "$defs": {
+    "BranchConfig": {
+      "additionalProperties": false,
+      "description": "Upstream policy under `[branch.NAME]`.",
+      "properties": {
+        "remote": {
+          "description": "Only adopt remote records observed through this named peer.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "CoverageConfig": {
       "additionalProperties": false,
       "description": "`[coverage]`\n\nA claim whose range, or a reference whose selection, takes more than `broad_share` of a\nfile's non-blank lines is *broad*: one claim backing a whole document, or one reference\nusing a whole document, raises coverage without saying which part supports what. Broad\nclaims and references are reported, and coverage is also given without them (`narrow`).",
@@ -16,6 +27,43 @@
           "maximum": 1.0,
           "minimum": 0.0,
           "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "DaemonConfig": {
+      "additionalProperties": false,
+      "description": "TCP write policy. The listener is read-only by default.",
+      "properties": {
+        "peer_bytes": {
+          "default": null,
+          "description": "Maximum cumulative bytes accepted from one IP address (default: 4 GiB).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "push_bytes": {
+          "default": null,
+          "description": "Maximum bytes accepted per push (default: 256 MiB).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "receive": {
+          "default": false,
+          "description": "Enable incoming pushes for the addresses in `write`.",
+          "type": "boolean"
+        },
+        "write": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "description": "Per-branch IP addresses or CIDRs. `*` is the fallback.",
+          "type": "object"
         }
       },
       "type": "object"
@@ -51,10 +99,36 @@
       },
       "type": "object"
     },
+    "GcConfig": {
+      "additionalProperties": false,
+      "description": "Local maintenance policy.",
+      "properties": {
+        "auto": {
+          "default": false,
+          "description": "Verify and collect eligible objects periodically after updates.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "Interval": {
       "description": "Duration such as `30m`, `6h`, `1d`, `2weeks`.",
       "pattern": "^\\s*[0-9]+\\s*[a-zA-Z]+(\\s*[0-9]+\\s*[a-zA-Z]+)*\\s*$",
       "type": "string"
+    },
+    "RemoteConfig": {
+      "additionalProperties": false,
+      "description": "A peer configured under `[remote.NAME]`.",
+      "properties": {
+        "url": {
+          "description": "A project-relative path, absolute path, or `tcp://HOST[:PORT]`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
     },
     "StoreConfig": {
       "additionalProperties": false,
@@ -88,10 +162,21 @@
   "additionalProperties": false,
   "description": "Configuration of the `evidence` command (global, project, or project-local layer).",
   "properties": {
+    "branch": {
+      "additionalProperties": {
+        "$ref": "#/$defs/BranchConfig"
+      },
+      "description": "Optional upstream for each branch.",
+      "type": "object"
+    },
     "coverage": {
       "$ref": "#/$defs/CoverageConfig",
       "default": {},
       "description": "Coverage: when a claim or a reference is too broad to count as precise evidence."
+    },
+    "daemon": {
+      "$ref": "#/$defs/DaemonConfig",
+      "description": "TCP listener settings."
     },
     "discovery": {
       "$ref": "#/$defs/DiscoveryConfig",
@@ -102,6 +187,17 @@
       "$ref": "#/$defs/ExecutionConfig",
       "default": {},
       "description": "How runs are executed."
+    },
+    "gc": {
+      "$ref": "#/$defs/GcConfig",
+      "description": "Object maintenance settings."
+    },
+    "remote": {
+      "additionalProperties": {
+        "$ref": "#/$defs/RemoteConfig"
+      },
+      "description": "Named peers for P2P synchronization.",
+      "type": "object"
     },
     "store": {
       "$ref": "#/$defs/StoreConfig",

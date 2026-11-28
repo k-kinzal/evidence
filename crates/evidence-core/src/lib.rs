@@ -30,6 +30,8 @@
 mod add;
 mod assessment;
 mod coverage;
+/// File-level records and peer synchronization.
+pub mod distributed;
 mod error;
 mod exec;
 mod fingerprint;
@@ -48,6 +50,7 @@ mod project;
 mod protection;
 mod remove;
 mod replay;
+mod replay_archive;
 mod snapshot;
 mod status;
 mod storage_policy;

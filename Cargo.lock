@@ -724,6 +724,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "evidence-daemon"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "evidence-core",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "evidence-wiki"
 version = "0.1.0"
 dependencies = [

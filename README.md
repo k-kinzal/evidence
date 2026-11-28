@@ -68,6 +68,77 @@ under `.evidence/objects/`. Commit those files with the definitions to let a fre
 checkout restore the accepted version. Productions that write claims automatically
 record the versions those claims used. A reference can also declare a fixed `revision`.
 
+## Synchronize peers
+
+Each evidence ID has its own history. `update` records definition changes and accepted
+production results. Use `update --pin` to record a hand-edited subject and its claims.
+
+```sh
+evidence init --bare /mnt/shared/evidence-peer
+evidence config set --local remote.team.url /mnt/shared/evidence-peer
+evidence update --offline
+evidence update --pin report
+evidence push team
+
+evidence clone /mnt/shared/evidence-peer work
+evidence -C work update --dry-run report
+evidence -C work update report
+```
+
+A bare peer holds definitions, version records, and transferable snapshots. A push adds
+immutable records and objects. A targeted update follows an evidence ID's dependencies.
+Use `--offline` to use local records, or `--dry-run` to fetch records and preview changes.
+
+Use `log ID` and `diff ID@VERSION` to inspect a version. `revert ID@VERSION` records the
+specified version again. `branch NAME`, `switch NAME`, and `merge NAME` operate on a named
+line of records. Use `update --branch NAME` to fetch a proposal for review. Concurrent
+versions that need a decision appear in `status`. Use `resolve ID` to write conflict
+markers, or `resolve ID --take VERSION` to adopt a recorded side.
+
+For a TCP peer, install the extension and run it in the bare directory.
+
+```sh
+cargo install --path crates/evidence-daemon
+evidence -C /srv/evidence daemon --listen 192.168.10.4:7467
+evidence clone tcp://192.168.10.4:7467 work
+```
+
+The daemon is read-only by default. Enable push for named branches and client networks in
+the receiving peer's local configuration. Configure an upstream under
+`[branch.main]` with `remote = "team"` when you want that remote to control which received
+records can advance the branch.
+
+```toml
+[daemon]
+receive = true
+
+[daemon.write]
+main = ["127.0.0.1", "192.168.10.0/24"]
+"*" = []
+```
+
+Each peer runs acquisitions with its own credentials. A subject-writing production
+without declared inputs is an acquisition by default. Use `acquisition = false` for an
+inputless production that generates original content. Use `acquisition = true` to
+identify an acquisition that also has declared inputs.
+
+For an acquisition that ordinarily gets the latest version, define `reconstruct` using
+the same output conventions as `run`. The peer record publishes locator values when
+`reconstruct` is defined. Store only public version or time-range information in those
+values.
+
+```toml
+[[productions]]
+name = "fetch"
+writes = ["subject"]
+run = ["fetch-report", "--latest", "--output", "{output}"]
+reconstruct = ["fetch-report", "--version", "{locator.version}", "--output", "{output}"]
+locator.version = ["report-version", "{output}"]
+```
+
+Run [the verification suite](verification/distributed/README.md) to check the Lean
+model and compare its scenarios with the Rust CLI and daemon in an evidence project.
+
 ## Snapshot encryption
 
 `evidence update` chooses how to store each new snapshot. External
@@ -124,8 +195,8 @@ update reports which artifact needs its inputs.
 
 Replay objects use salted Argon2id key derivation and authenticated encryption. Use them with
 inputs that are difficult to guess. A reader who retains the exact inputs can reopen the
-version later. Portable replay streams regular-file snapshots and inputs, using one recorded
-version per input ID. Encrypted directory snapshots are available through the local store.
+version later. Portable replay streams file and directory snapshots, using one recorded
+version per input ID.
 
 Materialized working files and hand-written definitions are ordinary files. Add approved
 definitions and shared objects to Git, and keep private working files and definitions local.
@@ -182,6 +253,7 @@ Each crate has a README describing its role.
 | [`evidence-cli`](crates/evidence-cli) | The `evidence` binary |
 | [`evidence-assess`](crates/evidence-assess) | Coverage reports and external citation assessment |
 | `evidence-completions` | Dynamic shell completion scripts |
+| `evidence-daemon` | TCP listener for worktree and bare peers |
 | [`evidence-wiki`](crates/evidence-wiki) | The `evidence-wiki` binary: wiki server, static site, MCP, scheduled agents, and skills |
 | [`xtask`](xtask) | `cargo xtask schemas [--check]`, `cargo xtask vocabulary` |
 | [`fuzz`](fuzz) | Fuzz targets for the evidence file parser and selectors (nightly, separate workspace) |

@@ -19,6 +19,7 @@ use crate::{Error, Result};
 const SALT: usize = 16;
 const LEGACY_LIMIT: u64 = 128 * 1024 * 1024;
 const VERSION: u32 = 2;
+const DIRECTORY_VERSION: u32 = 3;
 const STATE_LIMIT: u64 = 4 * 1024 * 1024;
 
 pub(crate) fn publish(
@@ -76,44 +77,75 @@ pub(crate) fn publish(
         }
     }
     let encrypted = store.scoped(cas_fs::Storage::Encrypted);
-    if encrypted.kind(&snapshot) != Some(ObjectKind::Blob) {
+    let Some(subject_kind) = encrypted.kind(&snapshot) else {
+        return Ok(None);
+    };
+    if dependencies.len() > 256 {
         return Ok(None);
     }
+    let mut inputs = Vec::new();
+    let mut snapshots = Vec::new();
+    let mut version = if subject_kind == ObjectKind::Tree {
+        DIRECTORY_VERSION
+    } else {
+        VERSION
+    };
+    for (id, (snapshot, class)) in dependencies {
+        let source = SnapshotVersion::Stored(snapshot, class).store(store);
+        let Some(kind) = source.kind(&snapshot) else {
+            return Ok(None);
+        };
+        if kind == ObjectKind::Tree {
+            version = DIRECTORY_VERSION;
+        }
+        inputs.push(id);
+        snapshots.push((source, snapshot, kind));
+    }
     if let Some((replay, old_state)) = previous
-        && replay.version == Some(VERSION)
+        && replay.version == Some(version)
         && contains(layout, replay)
         && same_basis(&pair.id, old_state, state)
     {
         return Ok(Some(replay.clone()));
     }
-    if dependencies.len() > 256 {
-        return Ok(None);
-    }
-    let mut inputs = Vec::new();
     let mut files = Vec::new();
-    for (id, (snapshot, class)) in dependencies {
-        let version = SnapshotVersion::Stored(snapshot, class);
-        let source = version.store(store);
-        if source.kind(&snapshot) != Some(ObjectKind::Blob) {
-            return Ok(None);
-        }
-        inputs.push(id);
-        files.push(source.open_blob(&snapshot)?);
+    for (source, snapshot, kind) in snapshots {
+        let file = snapshot_stream(layout, &source, snapshot, kind)?;
+        files.push(Input { file, kind });
+    }
+    let mut portable = state.clone();
+    portable.failures.clear();
+    for run in portable.runs.values_mut() {
+        run.run = None;
+        run.locator.clear();
+    }
+    if let Some(content) = portable.content.as_mut() {
+        content.run = None;
+    }
+    for pin in portable.pins.values_mut() {
+        pin.run = None;
+        pin.recorded_by = None;
     }
     let metadata =
-        Zeroizing::new(serde_json::to_vec(state).map_err(|e| Error::Invalid(e.to_string()))?);
+        Zeroizing::new(serde_json::to_vec(&portable).map_err(|e| Error::Invalid(e.to_string()))?);
     if metadata.len() as u64 > STATE_LIMIT {
         return Ok(None);
     }
     let mut salt = [0; SALT];
     getrandom::fill(&mut salt)
         .map_err(|_| Error::Invalid("system randomness unavailable".into()))?;
-    let context = context(&pair.id, &inputs, Some(VERSION))?;
-    let digest = prehash_stream(&salt, &context, &mut files)?;
+    let context = context(&pair.id, &inputs, Some(version))?;
+    let framed = version == DIRECTORY_VERSION;
+    let digest = prehash_stream(&salt, &context, &mut files, framed)?;
     let key = derive(&salt, &digest)?;
-    let body = encrypted.open_blob(&snapshot)?;
+    let body = snapshot_stream(layout, &encrypted, snapshot, subject_kind)?;
     let size = (metadata.len() as u64).to_be_bytes();
-    let reader = size.as_slice().chain(metadata.as_slice()).chain(body);
+    let tag = [u8::from(subject_kind == ObjectKind::Tree)];
+    let header = if framed { tag.as_slice() } else { &[] };
+    let reader = header
+        .chain(size.as_slice())
+        .chain(metadata.as_slice())
+        .chain(body);
     let chunks = chunk_store(layout);
     let mut writer = chunks.writer();
     writer.write_all(&salt).map_err(|e| replay_io(&e))?;
@@ -121,7 +153,7 @@ pub(crate) fn publish(
         .map_err(|e| replay_io(&e))?;
     let object = writer.finish()?;
     Ok(Some(ReplayState {
-        version: Some(VERSION),
+        version: Some(version),
         object,
         inputs,
     }))
@@ -176,6 +208,7 @@ fn context(id: &str, inputs: &[String], version: Option<u32>) -> Result<Vec<u8>>
     let tag = match version {
         None => "evidence-replay-v1",
         Some(VERSION) => "evidence-replay-v2",
+        Some(DIRECTORY_VERSION) => "evidence-replay-v3",
         Some(_) => return Err(Error::Invalid("unsupported replay format".into())),
     };
     serde_json::to_vec(&(tag, id, inputs)).map_err(|e| Error::Invalid(e.to_string()))
@@ -188,7 +221,8 @@ fn replay_io(error: &io::Error) -> Error {
 fn prehash_stream(
     salt: &[u8; SALT],
     context: &[u8],
-    inputs: &mut [File],
+    inputs: &mut [Input],
+    framed: bool,
 ) -> Result<Zeroizing<[u8; 32]>> {
     let mut hasher = Hasher::new();
     hasher.update(b"evidence-replay-kdf/v2\0");
@@ -196,6 +230,10 @@ fn prehash_stream(
     hasher.update(&(context.len() as u64).to_be_bytes());
     hasher.update(context);
     for input in inputs {
+        if framed {
+            hasher.update(&[u8::from(input.kind == ObjectKind::Tree)]);
+        }
+        let input = &mut input.file;
         let len = input.metadata().map_err(|e| replay_io(&e))?.len();
         hasher.update(&len.to_be_bytes());
         if io::copy(input, &mut hasher).map_err(|e| replay_io(&e))? != len {
@@ -232,7 +270,7 @@ fn derive(salt: &[u8; SALT], digest: &[u8; 32]) -> Result<EncryptionKey> {
     Ok(EncryptionKey::new(key))
 }
 
-fn object_path(layout: &Layout, id: ObjectId) -> PathBuf {
+pub(crate) fn object_path(layout: &Layout, id: ObjectId) -> PathBuf {
     let hex = id.to_hex();
     root(layout).join("blob").join(&hex[..2]).join(&hex[2..])
 }
@@ -249,7 +287,7 @@ fn root(layout: &Layout) -> PathBuf {
 pub(crate) fn contains(layout: &Layout, replay: &ReplayState) -> bool {
     match replay.version {
         None => object_path(layout, replay.object).is_file(),
-        Some(VERSION) => chunk_store(layout).contains(&replay.object),
+        Some(VERSION | DIRECTORY_VERSION) => chunk_store(layout).contains(&replay.object),
         Some(_) => false,
     }
 }
@@ -276,6 +314,7 @@ pub(crate) fn restore_available(
     if layout.key().is_none() {
         return Ok(HashSet::new());
     }
+    let lock = crate::lockfile::LockFile::load(layout)?;
     let mut restored = HashSet::new();
     loop {
         let mut round = Vec::new();
@@ -285,9 +324,24 @@ pub(crate) fn restore_available(
             {
                 continue;
             }
-            let Some(pending) = pair.file.state.as_ref().and_then(|s| s.pending.as_ref()) else {
+            if restored.contains(&pair.id) {
                 continue;
-            };
+            }
+            let replacement;
+            let pending =
+                if let Some(pending) = pair.file.state.as_ref().and_then(|s| s.pending.as_ref()) {
+                    pending
+                } else if crate::distributed::replacement(layout, &pair.id)?.is_some() {
+                    let text = fs::read_to_string(&pair.evid_path)
+                        .map_err(|e| Error::io(&pair.evid_path, e))?;
+                    let Some(value) = lock.pending(&text)? else {
+                        continue;
+                    };
+                    replacement = value;
+                    &replacement
+                } else {
+                    continue;
+                };
             let Some(replay) = &pending.replay else {
                 continue;
             };
@@ -302,7 +356,9 @@ pub(crate) fn restore_available(
                 )));
             }
             let state = match replay.version {
-                Some(VERSION) => restore_chunked(layout, ws, pair, pending, replay, tried)?,
+                Some(VERSION | DIRECTORY_VERSION) => {
+                    restore_chunked(layout, ws, pair, pending, replay, tried)?
+                }
                 None => {
                     let Some(inputs) = inputs_on_disk(layout, ws, &replay.inputs)? else {
                         continue;
@@ -389,7 +445,34 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Option<Zeroizing<Vec<u8>>>> {
     Ok((bytes.len() as u64 <= limit).then_some(bytes))
 }
 
-fn input_files(layout: &Layout, ws: &Workspace, ids: &[String]) -> Result<Option<Vec<File>>> {
+#[derive(Debug)]
+struct Input {
+    file: File,
+    kind: ObjectKind,
+}
+
+fn snapshot_stream(
+    layout: &Layout,
+    store: &Store,
+    snapshot: ObjectId,
+    kind: ObjectKind,
+) -> Result<File> {
+    if kind == ObjectKind::Blob {
+        return Ok(store.open_blob(&snapshot)?);
+    }
+    let tmp = staging_dir(layout)?;
+    let mut archive = tempfile::tempfile_in(tmp.path()).map_err(|e| replay_io(&e))?;
+    crate::replay_archive::write(store, snapshot, &mut archive)?;
+    archive.rewind().map_err(|e| replay_io(&e))?;
+    Ok(archive)
+}
+
+fn input_files(
+    layout: &Layout,
+    ws: &Workspace,
+    ids: &[String],
+    framed: bool,
+) -> Result<Option<Vec<Input>>> {
     let mut files = Vec::new();
     for id in ids {
         let Some(pair) = ws
@@ -399,14 +482,26 @@ fn input_files(layout: &Layout, ws: &Workspace, ids: &[String]) -> Result<Option
             return Ok(None);
         };
         let path = &pair.subject_path;
-        match fs::symlink_metadata(path) {
-            Ok(meta) if meta.is_file() => {
-                files.push(File::open(path).map_err(|e| Error::io(path, e))?);
+        let input = match fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_file() => Input {
+                file: File::open(path).map_err(|e| Error::io(path, e))?,
+                kind: ObjectKind::Blob,
+            },
+            Ok(meta) if meta.is_dir() && framed => {
+                let tmp = staging_dir(layout)?;
+                let store = Store::at(tmp.path().join("capture"));
+                let kind = ObjectKind::Tree;
+                let id = store.put_path_filtered(path, &crate::snapshot::snapshot_filter)?;
+                Input {
+                    file: snapshot_stream(layout, &store, id, kind)?,
+                    kind,
+                }
             }
             Ok(_) => return Ok(None),
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(Error::io(path, e)),
-        }
+        };
+        files.push(input);
     }
     Ok(Some(files))
 }
@@ -428,20 +523,52 @@ fn restore_chunked(
     replay: &ReplayState,
     tried: &mut BTreeMap<String, ObjectId>,
 ) -> Result<Option<State>> {
+    let Some((state, actual)) = decode_chunked(layout, ws, &pair.id, replay, tried)? else {
+        return Ok(None);
+    };
+    let tmp = staging_dir(layout)?;
+    let body = tmp.path().join("subject");
+    ws.store()
+        .scoped(cas_fs::Storage::Encrypted)
+        .materialize(&actual, &body)?;
+    commit_restored(layout, pair, pending, actual, &body, &state)?;
+    Ok(Some(state))
+}
+
+pub(crate) fn open_snapshot(
+    layout: &Layout,
+    ws: &Workspace,
+    id: &str,
+    replay: &ReplayState,
+) -> Result<Option<ObjectId>> {
+    if layout.key().is_none() || !matches!(replay.version, Some(VERSION | DIRECTORY_VERSION)) {
+        return Ok(None);
+    }
+    Ok(decode_chunked(layout, ws, id, replay, &mut BTreeMap::new())?.map(|(_, snapshot)| snapshot))
+}
+
+fn decode_chunked(
+    layout: &Layout,
+    ws: &Workspace,
+    id: &str,
+    replay: &ReplayState,
+    tried: &mut BTreeMap<String, ObjectId>,
+) -> Result<Option<(State, ObjectId)>> {
     let chunks = chunk_store(layout);
     if !chunks.contains(&replay.object) {
         return Ok(None);
     }
-    let Some(mut inputs) = input_files(layout, ws, &replay.inputs)? else {
+    let framed = replay.version == Some(DIRECTORY_VERSION);
+    let Some(mut inputs) = input_files(layout, ws, &replay.inputs, framed)? else {
         return Ok(None);
     };
     let mut stream = chunks.open(&replay.object)?;
     let mut salt = [0; SALT];
     stream.read_exact(&mut salt).map_err(|e| replay_io(&e))?;
-    let context = context(&pair.id, &replay.inputs, replay.version)?;
-    let digest = prehash_stream(&salt, &context, &mut inputs)?;
+    let context = context(id, &replay.inputs, replay.version)?;
+    let digest = prehash_stream(&salt, &context, &mut inputs, framed)?;
     let marker = ObjectId::of(digest.as_slice());
-    if tried.insert(pair.id.clone(), marker) == Some(marker) {
+    if tried.insert(id.to_owned(), marker) == Some(marker) {
         return Ok(None);
     }
     let key = derive(&salt, &digest)?;
@@ -453,6 +580,17 @@ fn restore_chunked(
         Err(e) => return Err(replay_io(&e)),
     }
     decoded.rewind().map_err(|e| replay_io(&e))?;
+    let directory = if framed {
+        let mut kind = [0];
+        decoded.read_exact(&mut kind).map_err(|e| replay_io(&e))?;
+        match kind[0] {
+            0 => false,
+            1 => true,
+            _ => return Err(Error::Invalid("invalid replay snapshot type".into())),
+        }
+    } else {
+        false
+    };
     let mut size = [0; 8];
     decoded.read_exact(&mut size).map_err(|e| replay_io(&e))?;
     let len = u64::from_be_bytes(size);
@@ -469,14 +607,16 @@ fn restore_chunked(
         .map_err(|e| replay_io(&e))?;
     let state: State = serde_json::from_slice(&metadata)
         .map_err(|_| Error::Invalid("invalid restored state".into()))?;
-    let deps = dependencies(&pair.id, &state)
+    let deps = dependencies(id, &state)
         .filter(|deps| deps.keys().eq(replay.inputs.iter()))
         .ok_or_else(|| Error::Invalid("invalid restored inputs".into()))?;
-    let body = tmp.path().join("subject");
-    let mut file = File::create(&body).map_err(|e| Error::io(&body, e))?;
-    io::copy(&mut decoded, &mut file).map_err(|e| Error::io(&body, e))?;
-    drop(file);
-    let actual = cas_fs::hash_path(&body)?;
+    let store = ws.store();
+    let encrypted = store.scoped(cas_fs::Storage::Encrypted);
+    let actual = if directory {
+        crate::replay_archive::read(&encrypted, &mut decoded)?
+    } else {
+        encrypted.put_reader(decoded)?
+    };
     if state.shared_baseline.is_some()
         || state
             .content
@@ -485,26 +625,43 @@ fn restore_chunked(
     {
         return Err(Error::Invalid("invalid restored snapshot".into()));
     }
-    let store = ws.store();
     for ((expected, class), mut input) in deps.values().zip(inputs) {
+        let store = store.scoped(class.unwrap_or(SnapshotStorage::Encrypted).into());
+        if input.kind == ObjectKind::Tree {
+            if crate::replay_archive::read(&store, &mut input.file)? != *expected {
+                return Err(Error::Invalid("invalid restored directory input".into()));
+            }
+            continue;
+        }
         let mut hash = Hasher::new();
-        io::copy(&mut input, &mut hash).map_err(|e| replay_io(&e))?;
+        io::copy(&mut input.file, &mut hash).map_err(|e| replay_io(&e))?;
         if hash.finish() != *expected {
             return Err(Error::Invalid("invalid restored input version".into()));
         }
-        let store = store.scoped(class.unwrap_or(SnapshotStorage::Encrypted).into());
         if !store.contains(expected) {
-            input.rewind().map_err(|e| replay_io(&e))?;
-            if store.put_reader(input)? != *expected {
+            input.file.rewind().map_err(|e| replay_io(&e))?;
+            if store.put_reader(input.file)? != *expected {
                 return Err(Error::Conflict("input changed during recovery".into()));
             }
         }
     }
-    if store.scoped(cas_fs::Storage::Encrypted).put_path(&body)? != actual {
-        return Err(Error::Invalid("invalid restored snapshot".into()));
+    Ok(Some((state, actual)))
+}
+
+fn replaceable(path: &Path) -> Result<bool> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| Error::io(path, e))?;
+    if !metadata.is_dir() {
+        return Ok(metadata.is_file());
     }
-    commit_restored(layout, pair, pending, actual, &body, &state)?;
-    Ok(Some(state))
+    for entry in fs::read_dir(path).map_err(|e| Error::io(path, e))? {
+        let entry = entry.map_err(|e| Error::io(path, e))?;
+        if !crate::snapshot::snapshot_filter(Path::new(&entry.file_name()))
+            || !replaceable(&entry.path())?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub(crate) fn commit_restored(
@@ -515,8 +672,13 @@ pub(crate) fn commit_restored(
     staged: &Path,
     state: &State,
 ) -> Result<()> {
+    let disk = disk_snapshot(&pair.subject_path);
+    let replace = disk.is_some()
+        && disk != Some(snapshot)
+        && crate::distributed::replacement(layout, &pair.id)? == disk
+        && replaceable(&pair.subject_path)?;
     if fs::symlink_metadata(&pair.subject_path).is_ok_and(|m| m.is_symlink())
-        || pair.subject_path.exists() && disk_snapshot(&pair.subject_path) != Some(snapshot)
+        || pair.subject_path.exists() && disk != Some(snapshot) && !replace
     {
         return Err(Error::Conflict(format!(
             "{} has local content; refusing to replace it with a recovered version",
@@ -533,7 +695,7 @@ pub(crate) fn commit_restored(
     }
     let mut transaction = Transaction::begin(layout, "replay")?;
     let result = (|| {
-        if !pair.subject_path.exists() {
+        if !pair.subject_path.exists() || replace {
             transaction.stage_path(&pair.subject_path, staged)?;
         }
         lock.stage_restored_state(layout, &mut transaction, &text, state)

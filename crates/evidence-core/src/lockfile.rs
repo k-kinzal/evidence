@@ -35,23 +35,40 @@ struct Document {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Entry {
+pub(crate) struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    plain: Option<PlainSnapshot>,
+    pub(crate) plain: Option<PlainSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    replay: Option<ReplayState>,
+    pub(crate) replay: Option<ReplayState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pins: Option<Pins>,
+    pub(crate) pins: Option<Pins>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) acquisition: Option<crate::distributed::Acquisition>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "storage", rename_all = "snake_case", deny_unknown_fields)]
-enum Pins {
+pub(crate) enum Pins {
     Plain { claims: BTreeMap<String, PinRecord> },
     Encrypted { key: ObjectId, object: ObjectId },
 }
 
 impl LockFile {
+    pub(crate) fn entry(&self, id: &str) -> Entry {
+        self.entries.get(id).cloned().unwrap_or_default()
+    }
+
+    pub(crate) fn replace(&mut self, id: &str, entry: Entry) {
+        if self.entry(id) != entry {
+            self.changed = true;
+            if entry == Entry::default() {
+                self.entries.remove(id);
+            } else {
+                self.entries.insert(id.to_owned(), entry);
+            }
+        }
+    }
+
     pub(crate) fn load(layout: &Layout) -> Result<Self> {
         let path = path(layout);
         let bytes = match fs::read(&path) {
@@ -184,6 +201,7 @@ impl LockFile {
             plain: shared.plain,
             replay: shared.replay,
             pins,
+            acquisition: previous.and_then(|entry| entry.acquisition.clone()),
         };
         let next = (entry != Entry::default()).then_some(entry);
         if previous != next.as_ref() {
@@ -289,7 +307,7 @@ fn path(layout: &Layout) -> PathBuf {
     layout.meta_dir().join("evidence.lock")
 }
 
-fn identity(text: &str) -> Result<String> {
+pub(crate) fn identity(text: &str) -> Result<String> {
     let definition = document::definition_in(text)
         .ok_or_else(|| Error::Invalid("invalid evidence identity".into()))?;
     let get = |key: &str| definition.get(key).and_then(toml::Value::as_str);
@@ -349,7 +367,7 @@ fn read_local(layout: &Layout, auth: &[u8]) -> Result<Option<State>, String> {
     }
 }
 
-fn pin_store(layout: &Layout) -> ChunkStore {
+pub(crate) fn pin_store(layout: &Layout) -> ChunkStore {
     let root = layout.meta_dir().join("objects");
     ChunkStore::new(root.join("pins/v1"), root.join("tmp"))
 }

@@ -120,7 +120,7 @@ fn redact(text: &str) -> String {
 }
 
 #[test]
-fn help_lists_the_five_core_commands() {
+fn help_lists_builtin_commands() {
     let p = Project::new();
     let text = p.stdout(&["--help"]);
     let commands: Vec<_> = text
@@ -131,8 +131,17 @@ fn help_lists_the_five_core_commands() {
         .take_while(|line| !line.is_empty())
         .filter_map(|line| line.split_whitespace().next())
         .collect();
-    assert_eq!(commands, ["init", "update", "status", "graph", "config"]);
-    p.cmd(&["update", "--pin", "report"]).assert().code(2);
+    assert_eq!(
+        commands,
+        [
+            "init", "clone", "push", "branch", "switch", "merge", "resolve", "revert", "log",
+            "diff", "gc", "update", "status", "graph", "config"
+        ]
+    );
+    p.cmd(&["update", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--pin"));
 }
 
 #[test]
@@ -207,7 +216,7 @@ fn extensions_receive_the_original_arguments_and_exit_status() {
         .env("PATH", bin.path())
         .assert()
         .success()
-        .stdout("config\necho-args\ngraph\ninit\nstatus\nupdate\n");
+        .stdout("branch\nclone\nconfig\ndiff\necho-args\ngc\ngraph\ninit\nlog\nmerge\npush\nresolve\nrevert\nstatus\nswitch\nupdate\n");
     p.cmd(&["config", "set", "--completion-helper"])
         .assert()
         .success()
@@ -255,7 +264,9 @@ fn update_status_and_impact() {
     p.cmd(&["status"])
         .assert()
         .success()
-        .stdout("Everything is up to date.\n");
+        .stdout(predicate::str::contains(
+            "local-only  raw  the acquisition has no reconstruction command\n",
+        ));
 
     let subgraph = p.json(&["graph",
         "MATCH p = (:Evidence {id: 'high'})-[:HAS_PRODUCTION]->(:Production)-[:INPUT]->(:Evidence {id: 'raw'}) RETURN p"

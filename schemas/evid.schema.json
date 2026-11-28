@@ -401,6 +401,10 @@
       "additionalProperties": false,
       "description": "A production: a command that writes the subject, claims, or both (`[[productions]]`).\n\nEvidence runs commands; it has no built-in knowledge of any data source. The program runs\nwithout a shell; placeholders such as `{output}`, `{claims}`, and `{input.NAME}` are\nexpanded in `run`, `env`, `cwd`, `stdin`, and `locator` (see `docs/format-v2.md`).",
       "properties": {
+        "acquisition": {
+          "description": "Whether this subject writer retrieves external data. Defaults to true for inputless\nsubject writers. Set false for jobs that generate original content.",
+          "type": "boolean"
+        },
         "cwd": {
           "description": "Working directory, relative to the evidence file. Defaults to its directory.",
           "type": "string"
@@ -439,6 +443,13 @@
           "description": "Claim namespace (required when `writes` has `claims`): the production owns every\nclaim id starting with `<namespace>.`.",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*(\\.[A-Za-z0-9][A-Za-z0-9_-]*)*$",
           "type": "string"
+        },
+        "reconstruct": {
+          "description": "Optional acquisition command for rebuilding a published version. Uses the same execution\nsettings as `run` and can expand `{locator.KEY}` in its arguments.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "run": {
           "description": "Program and arguments, e.g. `[\"curl\", \"-sSfo\", \"{output}\", \"https://…\"]`.",

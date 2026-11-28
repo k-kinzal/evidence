@@ -138,6 +138,9 @@ impl<'a> Resolver<'a> {
     /// The current version of a pair's subject: the captured file when editable, the
     /// adopted version when produced.
     pub(crate) fn current(&self, pair: &Pair) -> Result<Version, ResolveError> {
+        if let Some((id, class)) = self.ws.conflict_origins.get(&pair.id) {
+            return self.stored(*id, Some(*class));
+        }
         match pair.file.content_mode() {
             ContentMode::Produced => {
                 let Some(content) = pair.file.state.as_ref().and_then(|s| s.content.as_ref())
@@ -154,8 +157,10 @@ impl<'a> Resolver<'a> {
     }
 
     /// The current snapshot id of a pair (cheap for produced subjects).
-    #[allow(clippy::unused_self)]
     pub(crate) fn current_snapshot(&self, pair: &Pair) -> Option<ObjectId> {
+        if let Some((id, _)) = self.ws.conflict_origins.get(&pair.id) {
+            return Some(*id);
+        }
         match pair.file.content_mode() {
             ContentMode::Produced => pair
                 .file
@@ -211,6 +216,9 @@ impl<'a> Resolver<'a> {
     pub(crate) fn version_of(&self, reference: &Reference) -> Result<Version, ResolveError> {
         match reference.version() {
             RefVersion::Current => {
+                if let Some((id, class)) = self.ws.conflict_origins.get(reference.id()) {
+                    return self.stored(*id, Some(*class));
+                }
                 let pair = self
                     .ws
                     .get(reference.id())

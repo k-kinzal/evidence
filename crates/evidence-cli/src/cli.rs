@@ -44,7 +44,57 @@ pub(crate) enum Command {
     Init {
         /// Project root.
         path: Option<PathBuf>,
+        /// Create a peer store without a worktree.
+        #[arg(long)]
+        bare: bool,
     },
+    /// Create and update a working copy from a peer.
+    Clone {
+        remote: String,
+        destination: Option<PathBuf>,
+    },
+    /// Send recorded versions and shared objects to a configured peer.
+    Push { remote: Option<String> },
+    /// List branches, create one, or delete a local branch.
+    Branch {
+        name: Option<String>,
+        #[arg(short = 'd', long, requires = "name")]
+        delete: bool,
+    },
+    /// Switch to a branch.
+    Switch { branch: String },
+    /// Integrate a branch into the current one.
+    Merge { branch: String },
+    /// Write conflict markers or take a recorded side.
+    Resolve {
+        id: String,
+        /// A parent version, ours, or theirs.
+        #[arg(long)]
+        take: Option<String>,
+    },
+    /// Restore an earlier version by recording a new version.
+    Revert { target: String },
+    /// Show the version history of an evidence ID.
+    Log {
+        id: String,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long, conflicts_with = "branch")]
+        all: bool,
+    },
+    /// Compare recorded versions or a version and the worktree.
+    Diff {
+        target: String,
+        other: Option<String>,
+        #[arg(long, conflicts_with = "subject")]
+        definition: bool,
+        #[arg(long)]
+        subject: bool,
+        #[arg(long)]
+        stat: bool,
+    },
+    /// Verify and clean up the local object store.
+    Gc,
     /// Recover, restore, and refresh evidence in dependency order.
     Update(UpdateArgs),
     /// Show evidence that needs attention and project diagnostics.
@@ -71,7 +121,16 @@ pub(crate) struct UpdateArgs {
     /// Only run the selection; report dependents instead of re-running them.
     #[arg(long)]
     pub(crate) isolated: bool,
-    /// Show what would run, and why, without changing anything.
+    /// Work with local records only.
+    #[arg(long)]
+    pub(crate) offline: bool,
+    /// Fetch the named branch. Only the current branch is applied.
+    #[arg(long, conflicts_with = "pin")]
+    pub(crate) branch: Option<String>,
+    /// Record the selected subjects and claims without running productions.
+    #[arg(long, num_args = 1.., value_name = "TARGET", conflicts_with_all = ["targets", "force", "isolated", "jobs"])]
+    pub(crate) pin: Vec<String>,
+    /// Fetch records and show what would change without restoring or executing.
     #[arg(long, short = 'n')]
     pub(crate) dry_run: bool,
     /// Parallel jobs.

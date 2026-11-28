@@ -16,7 +16,8 @@ pub(crate) mod template;
 
 pub use cas_fs::ObjectId;
 pub use config::{
-    Config, CoverageConfig, DiscoveryConfig, ExecutionConfig, StoreConfig, UserConfig,
+    BranchConfig, Config, CoverageConfig, DaemonConfig, DiscoveryConfig, ExecutionConfig, GcConfig,
+    RemoteConfig, StoreConfig, UserConfig,
 };
 pub use diagnostic::{Diagnostic, Severity};
 pub use document::{Parsed, evid_path, parse, render, subject_path};

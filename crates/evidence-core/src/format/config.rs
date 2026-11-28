@@ -1,5 +1,7 @@
 //! Configuration file types (`config.toml`).
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +30,18 @@ pub struct Config {
     /// Coverage: when a claim or a reference is too broad to count as precise evidence.
     #[serde(default)]
     pub coverage: CoverageConfig,
+    /// Named peers for P2P synchronization.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub remote: BTreeMap<String, RemoteConfig>,
+    /// Optional upstream for each branch.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub branch: BTreeMap<String, BranchConfig>,
+    /// TCP listener settings.
+    #[serde(default, skip_serializing_if = "DaemonConfig::is_default")]
+    pub daemon: DaemonConfig,
+    /// Object maintenance settings.
+    #[serde(default, skip_serializing_if = "GcConfig::is_default")]
+    pub gc: GcConfig,
 }
 
 /// `[coverage]`
@@ -115,4 +129,54 @@ pub struct DiscoveryConfig {
     /// Additional gitignore-style patterns of paths to skip when looking for evidence files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore: Vec<String>,
+}
+
+/// A peer configured under `[remote.NAME]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteConfig {
+    /// A project-relative path, absolute path, or `tcp://HOST[:PORT]`.
+    pub url: String,
+}
+
+/// Upstream policy under `[branch.NAME]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BranchConfig {
+    /// Only adopt remote records observed through this named peer.
+    pub remote: Option<String>,
+}
+
+/// TCP write policy. The listener is read-only by default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct DaemonConfig {
+    /// Enable incoming pushes for the addresses in `write`.
+    pub receive: bool,
+    /// Per-branch IP addresses or CIDRs. `*` is the fallback.
+    pub write: BTreeMap<String, Vec<String>>,
+    /// Maximum bytes accepted per push (default: 256 MiB).
+    pub push_bytes: Option<u64>,
+    /// Maximum cumulative bytes accepted from one IP address (default: 4 GiB).
+    pub peer_bytes: Option<u64>,
+}
+
+impl DaemonConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// Local maintenance policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct GcConfig {
+    /// Verify and collect eligible objects periodically after updates.
+    pub auto: bool,
+}
+
+impl GcConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }

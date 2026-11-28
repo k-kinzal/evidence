@@ -287,9 +287,22 @@ pub struct Production {
     /// (placeholders expanded) or a command whose trimmed standard output is the value.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub locator: BTreeMap<String, LocatorValue>,
+    /// Whether this subject writer retrieves external data. Defaults to true for inputless
+    /// subject writers. Set false for jobs that generate original content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquisition: Option<bool>,
+    /// Optional acquisition command for rebuilding a published version. Uses the same execution
+    /// settings as `run` and can expand `{locator.KEY}` in its arguments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reconstruct: Vec<String>,
 }
 
 impl Production {
+    /// Whether the writer acquires data that peers have to obtain individually.
+    pub fn is_acquisition(&self) -> bool {
+        self.writes_subject() && self.acquisition.unwrap_or(self.inputs.is_empty())
+    }
+
     /// Whether the production writes the subject.
     pub fn writes_subject(&self) -> bool {
         self.writes.contains(&Output::Subject)

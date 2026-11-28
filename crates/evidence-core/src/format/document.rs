@@ -389,6 +389,32 @@ pub(crate) fn check(file: &EvidenceFile) -> Vec<Diagnostic> {
             }
         }
         check_action(p, &p.action(), &ptr, ActionKind::Production, &mut out);
+        if !p.reconstruct.is_empty() {
+            if !p.is_acquisition() || p.locator.is_empty() {
+                out.push(
+                    Diagnostic::error(
+                        "reconstruct-acquisition",
+                        "a reconstruction command needs an acquisition with public locator values",
+                    )
+                    .at_pointer(format!("{ptr}/reconstruct")),
+                );
+            }
+            for (index, arg) in p.reconstruct.iter().enumerate() {
+                if let Err(message) = template::expand(arg, |placeholder| {
+                    if let Placeholder::Locator(name) = placeholder
+                        && !p.locator.contains_key(name)
+                    {
+                        return Err(format!("unknown locator placeholder `{{locator.{name}}}`"));
+                    }
+                    Ok(String::new())
+                }) {
+                    out.push(
+                        Diagnostic::error("reconstruct-placeholder", message)
+                            .at_pointer(format!("{ptr}/reconstruct/{index}")),
+                    );
+                }
+            }
+        }
     }
     if let Some(verify) = &file.verify {
         let probe = Production {
@@ -404,6 +430,8 @@ pub(crate) fn check(file: &EvidenceFile) -> Vec<Diagnostic> {
             interval: None,
             inputs: Vec::new(),
             locator: std::collections::BTreeMap::new(),
+            acquisition: None,
+            reconstruct: Vec::new(),
         };
         check_action(&probe, verify, "/verify", ActionKind::Verify, &mut out);
         if writers.is_empty() {
@@ -608,6 +636,11 @@ fn check_action(
                         &field,
                     ));
                 }
+                Placeholder::Locator(_) => out.push(err(
+                    "placeholder",
+                    "locator placeholders are only used in reconstruct".into(),
+                    &field,
+                )),
                 Placeholder::Env(_) if stored => {
                     out.push(err(
                         "placeholder",

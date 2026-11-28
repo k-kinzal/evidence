@@ -178,6 +178,8 @@ impl Pair {
 pub(crate) struct Workspace {
     store: cas_fs::Store,
     encryption: bool,
+    pub(crate) conflict_origins:
+        BTreeMap<String, (cas_fs::ObjectId, crate::format::SnapshotStorage)>,
     pairs: Vec<Pair>,
     by_id: HashMap<String, usize>,
     member_files: Vec<MemberOnDisk>,
@@ -256,6 +258,7 @@ impl Workspace {
         let mut ws = Self {
             store: layout.store()?,
             encryption: layout.config().config.store.encryption_enabled(),
+            conflict_origins: BTreeMap::new(),
             pairs: Vec::new(),
             by_id: HashMap::new(),
             member_files: Vec::new(),

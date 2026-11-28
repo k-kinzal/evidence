@@ -125,7 +125,7 @@ fn entry_kind(kind: EntryKind) -> ObjectKind {
     }
 }
 
-fn validate_tree(tree: &Tree) -> Result<()> {
+pub(crate) fn validate_tree(tree: &Tree) -> Result<()> {
     let mut names = HashSet::new();
     for entry in tree.entries() {
         let name = entry.name.to_lowercase();
@@ -140,7 +140,7 @@ fn validate_tree(tree: &Tree) -> Result<()> {
     Ok(())
 }
 
-fn read_tree(mut reader: impl Read, size: u64) -> Result<(Tree, Vec<ObjectId>), Error> {
+pub(crate) fn read_tree(mut reader: impl Read, size: u64) -> Result<(Tree, Vec<ObjectId>), Error> {
     let mut magic = [0; 8];
     let mut len = [0; 8];
     reader
@@ -264,6 +264,18 @@ pub(crate) fn snapshot_id(layout: &Layout, plain: PlainSnapshot) -> Result<Objec
     }
 }
 
+pub(crate) fn import_snapshot(layout: &Layout, plain: PlainSnapshot) -> Result<ObjectId> {
+    let store = layout.store()?.scoped(Storage::Plain);
+    import(
+        Some(&store),
+        &chunk_store(layout),
+        object_of(plain),
+        None,
+        &mut HashMap::new(),
+        0,
+    )
+}
+
 pub(crate) fn verify(
     layout: &Layout,
     roots: impl IntoIterator<Item = PlainSnapshot>,
@@ -296,7 +308,8 @@ pub(crate) fn restore_available(
         }
         let local = pair.file.state();
         let unresolved = local.pending.is_some();
-        if !unresolved && pair.subject_path.exists() {
+        let replacement = crate::distributed::replacement(layout, &pair.id)?;
+        if !unresolved && pair.subject_path.exists() && replacement.is_none() {
             continue;
         }
         let text =
@@ -307,6 +320,12 @@ pub(crate) fn restore_available(
         let Some(plain) = pending.plain else {
             continue;
         };
+        if !unresolved
+            && pair.subject_path.exists()
+            && replacement == Some(snapshot_id(layout, plain)?)
+        {
+            continue;
+        }
         let chunks = chunk_store(layout);
         let store = ws.store().scoped(Storage::Plain);
         let actual = import(
@@ -320,7 +339,7 @@ pub(crate) fn restore_available(
         let state = recovered_state(pair, &pending, local, actual, plain)?;
         let tmp = replay::staging_dir(layout)?;
         let body = tmp.path().join("subject");
-        if !pair.subject_path.exists() {
+        if !pair.subject_path.exists() || replacement.is_some() {
             store.materialize(&actual, &body)?;
             if disk_snapshot(&body) != Some(actual) {
                 return Err(invalid());
