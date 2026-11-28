@@ -42,13 +42,35 @@ impl Store {
 
     pub(super) fn records(&self) -> Result<Records> {
         let mut records = Records::new();
-        for id in record::list(&self.root.join("records"))? {
-            if let Some(record) = self.record(id)? {
+        let ids = record::list(&self.root.join("records"))?;
+        self.load_with_parents(ids, &mut records)?;
+        Ok(records)
+    }
+
+    /// A scan can pass a parent's hash directory before a writer creates it and
+    /// still see the child in a later directory. Read absent ancestors by address.
+    pub(super) fn load_with_parents(
+        &self,
+        ids: impl IntoIterator<Item = ObjectId>,
+        records: &mut Records,
+    ) -> Result<()> {
+        let mut pending: Vec<_> = ids.into_iter().collect();
+        let mut scanned = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if !records.contains_key(&id)
+                && scanned.insert(id)
+                && let Some(record) = self.record(id)?
+            {
+                pending.extend(record.parents.iter().copied());
                 records.insert(id, record);
             }
         }
-        validate_graph(&records)?;
-        Ok(records)
+        for id in scanned {
+            if let Some(record) = records.get(&id) {
+                validate_edges(records, id, record)?;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn mark(&self, name: &str, id: ObjectId) -> Result<()> {
@@ -70,31 +92,33 @@ impl Store {
 
 pub(super) fn validate_graph(records: &Records) -> Result<()> {
     for (hash, record) in records {
-        for parent in &record.parents {
-            validate_parent(records, record, parent)?;
-        }
-        if let Some(ancestor) = record.ancestor
-            && (!record
-                .parents
-                .iter()
-                .all(|p| ancestors(records, [*p]).contains(&ancestor))
-                || &ancestor == hash)
-        {
-            return Err(Error::Invalid(format!("invalid merge ancestor {ancestor}")));
-        }
+        validate_edges(records, *hash, record)?;
     }
     Ok(())
 }
 
-pub(super) fn validate_parent(records: &Records, record: &Record, parent: &ObjectId) -> Result<()> {
-    if records
-        .get(parent)
-        .is_none_or(|entry| entry.id != record.id)
+pub(super) fn validate_edges(records: &Records, hash: ObjectId, record: &Record) -> Result<()> {
+    for parent in &record.parents {
+        if *parent == hash
+            || records
+                .get(parent)
+                .is_none_or(|entry| entry.id != record.id)
+        {
+            return Err(Error::Invalid(format!(
+                "invalid or missing parent {parent} for {}",
+                record.id
+            )));
+        }
+    }
+    if let Some(ancestor) = record.ancestor
+        && (ancestor == hash
+            || record.parents.is_empty()
+            || !record
+                .parents
+                .iter()
+                .all(|parent| ancestors(records, [*parent]).contains(&ancestor)))
     {
-        return Err(Error::Invalid(format!(
-            "invalid or missing parent {parent} for {}",
-            record.id
-        )));
+        return Err(Error::Invalid(format!("invalid merge ancestor {ancestor}")));
     }
     Ok(())
 }
@@ -246,7 +270,7 @@ impl Objects {
     pub(super) fn verify(&self) -> Result<cas_fs::VerifyReport> {
         let mut all = cas_fs::VerifyReport::default();
         for domain in [Domain::Plain, Domain::Replay, Domain::Pins] {
-            let report = self.chunks(domain).verify()?;
+            let report = self.chunks(domain).verify_available()?;
             all.checked += report.checked;
             all.corrupt.extend(report.corrupt);
         }
@@ -337,4 +361,41 @@ pub(super) fn transfer(
         }
     }
     Ok(complete.then_some(seen))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn loads_parents_missed_by_an_inventory_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let mut version = Record::new(
+            "notes".into(),
+            "notes.md.evid".into(),
+            "version = 2\nid = \"notes\"\n".into(),
+        );
+        let original = store.save(&version).unwrap();
+        version.parents = vec![original];
+        let parent = store.save(&version).unwrap();
+        version.parents = vec![parent];
+        let child = store.save(&version).unwrap();
+
+        let mut records = Records::new();
+        store.load_with_parents([child], &mut records).unwrap();
+        assert_eq!(
+            records.keys().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([original, parent, child])
+        );
+
+        std::fs::remove_file(store.record_path(original)).unwrap();
+        assert!(
+            store
+                .load_with_parents([child], &mut Records::new())
+                .is_err()
+        );
+    }
 }

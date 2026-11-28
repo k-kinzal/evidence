@@ -421,22 +421,9 @@ impl Server {
                             record.branch
                         )));
                     }
-                    for parent in &record.parents {
-                        if !records.contains_key(parent)
-                            && let Some(entry) = self.store.record(*parent)?
-                        {
-                            records.insert(*parent, entry);
-                        }
-                        store::validate_parent(records, &record, parent)?;
-                    }
-                    if let Some(ancestor) = record.ancestor
-                        && !record
-                            .parents
-                            .iter()
-                            .all(|p| store::ancestors(records, [*p]).contains(&ancestor))
-                    {
-                        return Err(protocol());
-                    }
+                    self.store
+                        .load_with_parents(record.parents.iter().copied(), records)?;
+                    store::validate_edges(records, id, &record)?;
                     let complete =
                         store::transfer(&record.lock, &self.store.object_store(), |key| {
                             send(stream, &Reply::Need(key))?;

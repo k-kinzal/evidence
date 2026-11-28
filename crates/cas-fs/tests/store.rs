@@ -98,6 +98,40 @@ fn verify_detects_corruption_and_prune_removes_unreachable() {
 }
 
 #[test]
+fn verifies_an_incomplete_replica_without_ignoring_corruption() {
+    use cas_fs::ChunkStore;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let source = ChunkStore::new(tmp.path().join("source"), tmp.path().join("tmp"));
+    let replica_root = tmp.path().join("replica");
+    let replica = ChunkStore::new(&replica_root, tmp.path().join("tmp"));
+    let manifest = source.put(b"shared bytes".as_slice()).unwrap();
+    replica
+        .import_part(true, &manifest, &source.read_part(true, &manifest).unwrap())
+        .unwrap();
+
+    assert_eq!(replica.verify().unwrap().corrupt, [manifest]);
+    assert!(replica.verify_available().unwrap().corrupt.is_empty());
+
+    let chunk = source.manifest_chunks(&manifest).unwrap()[0];
+    replica
+        .import_part(false, &chunk, &source.read_part(false, &chunk).unwrap())
+        .unwrap();
+    assert!(replica.verify().unwrap().corrupt.is_empty());
+
+    let hex = chunk.to_hex();
+    fs::write(
+        replica_root.join("chunk").join(&hex[..2]).join(&hex[2..]),
+        b"tampered",
+    )
+    .unwrap();
+    assert_eq!(
+        replica.verify_available().unwrap().corrupt,
+        [manifest, chunk]
+    );
+}
+
+#[test]
 fn storage_classes_verify_and_prune_identical_trees_independently() {
     use cas_fs::{EncryptionKey, ObjectId, Storage};
     use zeroize::Zeroizing;

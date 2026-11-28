@@ -104,17 +104,35 @@ impl ChunkStore {
 
     /// Checks all stored manifests and chunks, including the full digest of each stream.
     pub fn verify(&self) -> Result<VerifyReport, Error> {
+        self.verify_parts(false)
+    }
+
+    /// Verifies the bytes available in a partial replica. A stream whose chunks
+    /// have yet to arrive is checked in full once all of its chunks are present.
+    pub fn verify_available(&self) -> Result<VerifyReport, Error> {
+        self.verify_parts(true)
+    }
+
+    fn verify_parts(&self, allow_missing_chunks: bool) -> Result<VerifyReport, Error> {
         let mut report = VerifyReport::default();
         for id in self.list("manifest")? {
             report.checked += 1;
-            if self
-                .open(&id)
-                .and_then(|mut r| {
-                    io::copy(&mut r, &mut io::sink()).map_err(|e| Error::io(&self.root, e))
-                })
-                .is_err()
-            {
-                report.corrupt.push(id);
+            match self.open(&id) {
+                Ok(mut reader) => {
+                    if let Err(error) = io::copy(&mut reader, &mut io::sink())
+                        && !(allow_missing_chunks
+                            && matches!(
+                                error
+                                    .get_ref()
+                                    .and_then(|error| error.downcast_ref::<Error>()),
+                                Some(Error::NotFound(_))
+                            ))
+                    {
+                        report.corrupt.push(id);
+                    }
+                }
+                Err(Error::NotFound(_)) if allow_missing_chunks => {}
+                Err(_) => report.corrupt.push(id),
             }
         }
         for id in self.list("chunk")? {
